@@ -6,6 +6,7 @@ public final class PasteboardTransaction {
     private var savedItems: [NSPasteboardItem] = []
     private let initialChangeCount: Int
     private var writtenChangeCount: Int?
+    private var finished = false
 
     public init?(pasteboard: NSPasteboard = .general) {
         self.pasteboard = pasteboard
@@ -22,7 +23,7 @@ public final class PasteboardTransaction {
     }
 
     public func write(_ text: String) -> Bool {
-        guard pasteboard.changeCount == (writtenChangeCount ?? initialChangeCount) else { return false }
+        guard !finished, pasteboard.changeCount == (writtenChangeCount ?? initialChangeCount) else { return false }
         pasteboard.clearContents()
         writtenChangeCount = pasteboard.changeCount
         guard pasteboard.setString(text, forType: .string) else { restore(); return false }
@@ -37,14 +38,18 @@ public final class PasteboardTransaction {
 
     /// Call only after our Copy command, with unchanged app focus and no user
     /// input. The copied value becomes ours to restore after conversion.
-    public func acceptCopyResult(expectedSelectedText: String? = nil) -> String? {
+    public func acceptCopyResult(expectedSelectedText: String? = nil, requireMatch: Bool = false) -> String? {
         guard hasCopyResult else { return nil }
-        writtenChangeCount = pasteboard.changeCount
+        let revision = pasteboard.changeCount
         let plainText = pasteboard.string(forType: .string)
+        let html = pasteboard.string(forType: .html)
+        guard pasteboard.changeCount == revision else { return nil }
+        writtenChangeCount = revision
+        if requireMatch { guard let expectedSelectedText, plainText == expectedSelectedText else { return nil } }
         // Figma includes scene metadata even when copying styled characters.
         // Accept it only when a text editor selection independently matches;
         // copying a canvas object must not be mistaken for selected characters.
-        if let html = pasteboard.string(forType: .html),
+        if let html,
            html.contains("<!--(figma)") || html.contains("data-buffer=") {
             guard let expectedSelectedText, !expectedSelectedText.isEmpty,
                   plainText == expectedSelectedText else { return nil }
@@ -53,6 +58,8 @@ public final class PasteboardTransaction {
     }
 
     public func restore() {
+        guard !finished else { return }
+        finished = true
         guard let writtenChangeCount else { return }
         if pasteboard.changeCount == writtenChangeCount {
             pasteboard.clearContents()

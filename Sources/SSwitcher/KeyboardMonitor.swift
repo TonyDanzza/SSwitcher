@@ -4,10 +4,18 @@ import SwitcherCore
 final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
     var onUserActivity: (() -> Void)?
+    var onRealInput: (() -> Void)?
+    var onGestureRelease: ((Double) -> Void)?
+    var onGestureCancelled: (() -> Void)?
     var canStartConversion: (() -> Bool)?
-    private var burst = ShiftBurstGate()
+    private var burst = ShiftBurstGate(quietInterval: ConversionTiming.shiftQuiet)
     private var pendingDispatch: DispatchWorkItem?
     private(set) var inputGeneration: UInt64 = 0
+    private(set) var activityGeneration: UInt64 = 0
+    private(set) var lastGestureRelease = ProcessInfo.processInfo.systemUptime
+    private var modifiers = PhysicalModifierState()
+    private static let modifierFlags: [UInt16: CGEventFlags] = [56: .maskShift, 60: .maskShift, 55: .maskCommand, 54: .maskCommand,
+                                                               59: .maskControl, 62: .maskControl, 58: .maskAlternate, 61: .maskAlternate, 63: .maskSecondaryFn]
     private(set) var shiftEventCount = 0
     private(set) var doubleShiftCount = 0
     private(set) var syntheticEventCount = 0
@@ -15,6 +23,39 @@ final class KeyboardMonitor {
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     var isRunning: Bool { tap != nil }
+    private var hardwareModifierKeysDown: Set<UInt16> {
+        Set(PhysicalModifierState.unsafeKeys.filter { CGEventSource.keyState(.hidSystemState, key: CGKeyCode($0)) })
+    }
+    var physicalModifiersClear: Bool {
+        modifiers.permitsMutation(hardwareKeysDown: hardwareModifierKeysDown)
+    }
+    // After posting our own arrows, HID key state can still describe queued
+    // synthetic Shift. Only unmarked transitions update this tracked state.
+    var observedModifiersClear: Bool { modifiers.observedModifiersClear }
+
+    func claimConversion() -> Bool {
+        if burst.state == .running { return true }
+        return burst.beginConversion()
+    }
+    func conversionFinished(unverified: Bool) {
+        burst.complete(at: ProcessInfo.processInfo.systemUptime, unverified: unverified)
+        detector.reset()
+    }
+    func focusChanged() {
+        inputGeneration &+= 1
+        burst.realInput()
+        pendingDispatch?.cancel(); pendingDispatch = nil
+        detector.cancelGesture()
+        onGestureCancelled?()
+        onRealInput?()
+    }
+    func triggerForDiagnostics() {
+        guard canStartConversion?() != false, physicalModifiersClear else { return }
+        lastGestureRelease = ProcessInfo.processInfo.systemUptime
+        burst.shiftChanged(down: false, at: lastGestureRelease)
+        onGestureRelease?(lastGestureRelease)
+        onDoubleShift?()
+    }
 
     @discardableResult
     func start() -> Bool {
@@ -39,6 +80,7 @@ final class KeyboardMonitor {
         self.tap = tap
         self.source = source
         detector.reset()
+        modifiers.reset()
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         return true
@@ -49,6 +91,9 @@ final class KeyboardMonitor {
         pendingDispatch?.cancel()
         pendingDispatch = nil
         burst.cancel()
+        burst.realInput()
+        onGestureCancelled?()
+        onRealInput?()
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         tap = nil
@@ -62,6 +107,8 @@ final class KeyboardMonitor {
             burst.cancel()
             pendingDispatch?.cancel()
             inputGeneration &+= 1
+            onGestureCancelled?()
+            onRealInput?()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
@@ -69,40 +116,51 @@ final class KeyboardMonitor {
             syntheticEventCount += 1
             return
         }
-        onUserActivity?()
+        activityGeneration &+= 1
+        // The listening tap does only local bookkeeping/invalidation. AppKit
+        // work is dispatched after the callback has returned to its run loop.
+        DispatchQueue.main.async { [weak self] in self?.onUserActivity?() }
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         // A second double Shift must not cancel selection restoration from the
         // first conversion. Actual typing, clicks and other modifiers still do.
         if type != .flagsChanged || (key != 56 && key != 60) {
             inputGeneration &+= 1
-            burst.cancel()
+            burst.realInput()
             pendingDispatch?.cancel()
+            onGestureCancelled?()
+            onRealInput?()
         }
         guard type == .flagsChanged else { detector.cancelGesture(); return }
+        if let flag = Self.modifierFlags[key] { modifiers.changed(key: key, groupDown: event.flags.contains(flag)) }
+        let hardwareDown = hardwareModifierKeysDown
+        let shiftDown = modifiers.shiftHeld || hardwareDown.contains(56) || hardwareDown.contains(60)
         if key == 56 || key == 60 {
             shiftEventCount += 1
-            burst.shiftChanged(down: event.flags.contains(.maskShift), at: ProcessInfo.processInfo.systemUptime)
+            burst.shiftChanged(down: shiftDown, at: ProcessInfo.processInfo.systemUptime)
             pendingDispatch?.cancel()
         }
-        let otherModifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskSecondaryFn]
         if detector.shiftChanged(
-            key: key, anyShiftDown: event.flags.contains(.maskShift),
-            otherModifierDown: !event.flags.intersection(otherModifiers).isEmpty,
+            key: key, anyShiftDown: shiftDown,
+            otherModifierDown: modifiers.otherModifierHeld || !hardwareDown.subtracting([56, 60]).isEmpty,
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             doubleShiftCount += 1
             if canStartConversion?() != false { burst.request() }
         }
-        guard burst.pending, !event.flags.contains(.maskShift) else { return }
+        guard burst.pending, !shiftDown else { return }
+        lastGestureRelease = ProcessInfo.processInfo.systemUptime
+        onGestureRelease?(lastGestureRelease)
         let generation = inputGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.inputGeneration == generation,
-                  self.burst.consume(at: ProcessInfo.processInfo.systemUptime),
-                  self.canStartConversion?() != false else { return }
+                  self.canStartConversion?() != false,
+                  self.physicalModifiersClear, self.burst.consume(at: ProcessInfo.processInfo.systemUptime),
+                  self.burst.beginConversion() else { return }
+            self.detector.reset()
             self.onDoubleShift?()
         }
         pendingDispatch = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + burst.quietInterval + 0.005, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + burst.quietInterval, execute: work)
     }
 
     deinit { stop() }

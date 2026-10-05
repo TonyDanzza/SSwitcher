@@ -104,4 +104,28 @@ final class PasteboardTransactionTests: XCTestCase {
             XCTAssertEqual(pasteboard.string(forType: .string), "original")
         }
     }
+
+    func testLateInitialCopyCannotBeAcceptedAsVerificationPlainText() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        XCTAssertTrue(transaction.write("first Copy probe"))
+        pasteboard.clearContents(); pasteboard.setString("ghbdtn", forType: .string)
+        XCTAssertEqual(transaction.acceptCopyResult(), "ghbdtn")
+        XCTAssertTrue(transaction.write("привет"))
+        XCTAssertTrue(transaction.write("verification Copy probe"))
+        // A late response from the first Copy has no Figma HTML to identify it.
+        pasteboard.clearContents(); pasteboard.setString("ghbdtn", forType: .string)
+        XCTAssertNil(transaction.acceptCopyResult(expectedSelectedText: "привет", requireMatch: true))
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testRestoredTransactionCannotWriteAfterLateCallback() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        XCTAssertTrue(transaction.write("temporary"))
+        transaction.restore()
+        XCTAssertFalse(transaction.write("late callback"))
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
 }

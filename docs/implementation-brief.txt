@@ -1,0 +1,45 @@
+Historical implementation brief — 2026-10-06
+This is the task prompt supplied to GPT-6.1 Sol (max), retained for review. Later review corrections and final evidence are in architecture.md and validation.md.
+
+SSwitcher optimization and refactoring — implementation brief for GPT-6.1 Sol, max
+
+User workflow for this chat: the primary agent researches and writes the task; GPT-6.1 Sol at max implements; primary independently reviews, requests fixes, verifies real app behavior, then installs/publishes. Do not delegate further. Work in /Users/tonydanzza/Documents/SSwitcher on the shared checkout. Baseline main 8f2ea8e, installed 0.1.6. Do not commit, push, install, restart apps, change OS permissions or manipulate user documents; primary owns these steps. You may build and test (use escalation for Swift caches if necessary).
+
+Implement all five optimization directions, while preserving correctness, then simplify the resulting code:
+1. Replace fixed selection wait chain (400 + 150 + 50ms) with bounded, condition-driven verification where supported. AXObserver is an optional wakeup hint, never proof of success; retain a bounded fallback for missing/lying canvas AX. Avoid aggressive speculative retries of Copy/Paste that could mutate/duplicate content. Figma selection requires verification using actual copied text, not stale AX selection.
+2. Improve the 145ms post-gesture delay without reintroducing Shift-storm deletion. Design/test an explicit gate state machine: no overlapping/queued replacements; do not mutate with held physical modifiers; cancel on real input or focus changes. Do not simply delete debounce and call it done. Use a conservative reduced delay if reliable immediate execution cannot be proven. Explain timing policy and tradeoff.
+3. Reduce AX round trips. Batch value/range reads where possible, safely decode CFNull and AX error values, retain final validation before deletion. Cache editor capabilities with invalidation (per process/version/session and bounded expiry, not permanent blanket blacklist). Avoid redundant AXManualAccessibility activation. Put app-specific compatibility behavior into a small named policy/adapter, not scattered bundle-ID conditionals. Keep Figma exceptions necessary for safety.
+4. Bound animation overhead more tightly (target 40–60ms capture budget and 80–100ms reveal, justify constants). Skip unsupported geometry, multiline/offscreen/secure cases. Honor Reduce Motion. No continuous capture, OCR, full-screen screenshots, disk pixel storage or network. Figma currently returns AXBoundsForRange (0,1112,0,0), so do not pretend animation works there or guess geometry. Input/focus changes must cancel pending captures as well as visible overlays; late callbacks never show stale images or perform replacement twice. Ensure overlays cannot capture focus and release resources.
+5. Measure end-to-end gesture-release→confirmed replacement and separate gate, AX read, capture, mutation, confirmation, reveal timings with OSSignposter and bounded in-memory summaries (median/p95 only with adequate count). No user text/clipboard/screenshot logging. Distinguish editor acknowledgement from on-screen rendered completion. Keep event-tap callbacks short, move synchronous remote AX work away from UI/main run loop with explicit serialization and safe cancellation. All AppKit UI stays main-thread confined. Do not add broad unchecked Sendable declarations to silence actual races.
+
+Architecture proportional to this tiny app: pure value types/state machines in SwitcherCore; a clear conversion coordinator/transaction object owning each attempt, AX client and editor compatibility policy, clipboard ownership, performance recorder, overlay presenter, thin menu/UI composition. Prefer a handful of cohesive types over an architecture framework, one-line wrappers, or protocols with no test seam. Replace global static mutable conversion state and deeply nested callbacks where useful. Name and centralize timing budgets, distinguish readiness deadlines from mandatory fixed sleeps. No WidgetKit, no unnecessary SwiftUI migration, external libraries, background daemons, keyboard text history or new permissions.
+
+Required invariants:
+- Same Shift twice; only word immediately ending at caret (never inside/start/after whitespace), no temporary highlight in word mode.
+- User selection remains selected and reverses correctly. No layer/object conversion in Figma.
+- All clipboard formats preserved; newer user copy wins.
+- No destructive mutation after real input/focus switch, no repeat delete after unverified result until real input changes. No concurrent conversion, no queued storms.
+- Existing secure-input restrictions and TCC identity remain. macOS13 baseline; screenshot APIs availability guarded15.2+. Existing icons preserved.
+- Default idle work near zero; remove permanent 2s permission polling once granted, retain recovery on activation/menu/open appropriate and bounded retry only while needed. Diagnostics updates only while visible.
+
+Apple documentation researched by primary; read relevant docs and local SDK declarations before relying on API behavior:
+https://developer.apple.com/documentation/xcode/improving-app-responsiveness
+https://developer.apple.com/documentation/technologyoverviews/uikit-appkit
+https://developer.apple.com/documentation/applicationservices/1460133-axobservercreate
+https://developer.apple.com/documentation/applicationservices/1462051-axuielementcopymultipleattribute
+https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/Timers.html
+https://developer.apple.com/documentation/os/ossignposter
+https://developer.apple.com/documentation/coregraphics/cgevent/tapcreate(tap:place:options:eventsofinterest:callback:userinfo:)
+https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager
+Apple: UI only on main thread; offload non-UI blocking work; observer notifications may be unsupported; batch AX results can include CFNull/errors; event tap callback executes on its registered run loop; minimize idle timers; pair signpost begin/end exactly once.
+
+Known test issues:
+- CUA selectText in Figma can change only AX mirror, NOT real canvas caret. Primary must use actual keyboard navigation/click before testing; no AX selection setters to move canvas caret.
+- Synthetic Cmd+C/V can leave combinedSessionState showing Command until next real modifier event. Do not misclassify your own Copy's Command as held hardware modifier and abort all selection conversions.
+- Figma replacement baseline acknowledged around280–320ms excluding145ms gate; native about50–100ms with screenshot22–35ms. These are individual observations, not representative benchmarks.
+- Previous40tap storms coalesced into one conversion; preserve protection with revised policy and test interleavings during conversion, not just before.
+- No installed test-only gesture switches in final build.
+
+Validation: preserve existing37tests; add meaningful deterministic tests for transaction lifecycle, stale/late callbacks, observer versus polling deadlines, burst interleavings, capability cache expiry and unsupported batch attributes as appropriate. Avoid implementation-mirroring trivial tests. Run swift test and release build. Document architecture/Apple sources and a real validation matrix, explicitly distinguishing automated evidence, primary live tests and unverified cases. Update README only for implemented behavior. Do not bump version until primary review.
+
+Deliver working code in shared checkout, concise changes/tests/risk report, and any unresolved issues. Send interim architecture outline before major edits and flag safety tradeoffs promptly. Primary may send review feedback; iterate until approved.

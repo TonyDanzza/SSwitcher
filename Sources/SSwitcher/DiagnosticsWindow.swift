@@ -12,7 +12,7 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         self.readStatus = readStatus
         self.runCheck = runCheck
         self.requestCapture = requestCapture
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 650, height: 540),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 730),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Проверка SSwitcher"
         window.isReleasedWhenClosed = false
@@ -59,32 +59,47 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         editor.isAutomaticSpellingCorrectionEnabled = false
         editor.font = .systemFont(ofSize: 22)
         editor.string = "ghbdtn"
+        editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
         editor.setAccessibilityLabel("Тестовый текст")
         scroll.documentView = editor
         content.addArrangedSubview(scroll)
         scroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: 100).isActive = true
         content.addArrangedSubview(NSButton(title: "Проверить замену текста", target: self, action: #selector(check)))
-        content.addArrangedSubview(NSButton(title: "Разрешить анимацию замены…", target: self, action: #selector(allowCapture)))
+        let actions = NSStackView(views: [NSButton(title: "Разрешить анимацию замены…", target: self, action: #selector(allowCapture)),
+                                         NSButton(title: "Скопировать диагностику", target: self, action: #selector(copyDiagnostics))])
+        actions.orientation = .horizontal
+        actions.spacing = 12
+        content.addArrangedSubview(actions)
         status.stringValue = readStatus()
         window.center()
     }
 
     @objc private func allowCapture() { requestCapture() }
+    @objc private func copyDiagnostics() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let report = "SSwitcher \(version)\nmacOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" + readStatus()
+        NSPasteboard.general.clearContents()
+        if !NSPasteboard.general.setString(report, forType: .string) { NSSound.beep() }
+    }
 
     private func startUpdates() {
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
+            guard self.window?.isVisible == true, self.window?.isMiniaturized == false else { return }
             let value = self.readStatus()
             if self.status.stringValue != value { self.status.stringValue = value }
         }
+        timer?.tolerance = 0.05
     }
 
     func windowWillClose(_ notification: Notification) {
         timer?.invalidate()
         timer = nil
     }
+    func windowDidMiniaturize(_ notification: Notification) { timer?.invalidate(); timer = nil }
+    func windowDidDeminiaturize(_ notification: Notification) { startUpdates() }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 

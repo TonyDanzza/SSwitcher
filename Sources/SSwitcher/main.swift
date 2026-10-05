@@ -3,12 +3,14 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let monitor = KeyboardMonitor()
+    private let editor = ConversionCoordinator()
+    private let loginAtLaunch = LoginAtLaunch()
     private var enabled = !UserDefaults.standard.bool(forKey: "paused")
-    private var lastError: String?
     private var lastAttempt = "Ещё не срабатывал"
     private var lastResult = "Ожидание двойного Shift"
     private var activationObserver: NSObjectProtocol?
     private var permissionTimer: Timer?
+    private var permissionRetries = 0
     private var diagnosticsWindow: DiagnosticsWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -21,24 +23,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
-        monitor.onUserActivity = { ReplacementOverlay.cancel() }
-        monitor.canStartConversion = { !TextEditor.isConverting }
+        monitor.onUserActivity = { [weak self] in self?.editor.overlay.cancel() }
+        monitor.onRealInput = { [weak self] in self?.editor.userInputChanged() }
+        monitor.onGestureRelease = { [weak self] time in self?.editor.performance.gestureReleased(at: time) }
+        monitor.onGestureCancelled = { [weak self] in self?.editor.performance.cancelGesture() }
+        monitor.canStartConversion = { [weak self] in self?.editor.isConverting == false }
         monitor.onDoubleShift = { [weak self] in
-            guard let self, self.enabled, !TextEditor.isConverting else { return }
+            guard let self, self.enabled, !self.editor.isConverting, self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             self.lastResult = "Проверяю поле ввода…"
             let generation = self.monitor.inputGeneration
-            TextEditor.convertAtCursor(isInputUnchanged: { [weak self] in
+            let activity = self.monitor.activityGeneration
+            self.editor.convertAtCursor(releaseTime: self.monitor.lastGestureRelease, isInputUnchanged: { [weak self] in
                 self?.monitor.inputGeneration == generation
-            }) { [weak self] outcome in
+            }, isActivityUnchanged: { [weak self] in self?.monitor.activityGeneration == activity },
+               modifiersClear: { [weak self] in self?.monitor.physicalModifiersClear == true },
+               observedModifiersClear: { [weak self] in self?.monitor.observedModifiersClear == true }) { [weak self] outcome in
                 guard let self else { return }
-                self.lastError = nil
+                if case .unverified = outcome { self.monitor.conversionFinished(unverified: true) }
+                else { self.monitor.conversionFinished(unverified: false) }
                 switch outcome {
                 case .ignored: self.lastResult = "Курсор должен стоять в конце слова"
+                case .cancelled: self.lastResult = "Замена отменена: ввод или активное поле изменились"
                 case .converted: self.lastResult = "Текст заменён — подтверждено редактором"
                 case .unverified: self.lastResult = "Вставка отправлена; редактор не подтвердил результат"
                 case .failure(let message):
-                    self.lastError = message
                     self.lastResult = message
                     NSSound.beep()
                 }
@@ -47,29 +56,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { notification in
-            ReplacementOverlay.cancel()
+        ) { [weak self] notification in
+            guard let self else { return }
+            self.monitor.focusChanged()
+            self.editor.overlay.cancel()
+            self.refreshPermissions()
             if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-                TextEditor.prepareAccessibility(for: app)
+                self.editor.prepareAccessibility(for: app)
             }
         }
-        if let app = NSWorkspace.shared.frontmostApplication { TextEditor.prepareAccessibility(for: app) }
-        if enabled { monitor.start() }
+        if let app = NSWorkspace.shared.frontmostApplication { editor.prepareAccessibility(for: app) }
+        refreshPermissions()
         rebuildMenu()
-        // Also pick up permission granted while System Settings is open.
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            guard let self, self.enabled else { return }
-            if !CGPreflightListenEventAccess() {
-                self.monitor.stop()
-            } else if !self.monitor.isRunning {
-                self.monitor.start()
-            }
-        }
-        permissionTimer?.tolerance = 0.5
         if CommandLine.arguments.contains("--check") { showDiagnostics() }
     }
 
-    func menuWillOpen(_ menu: NSMenu) { rebuildMenu() }
+    func applicationDidBecomeActive(_ notification: Notification) { refreshPermissions() }
+    func menuWillOpen(_ menu: NSMenu) { refreshPermissions(); rebuildMenu() }
+
+    /// Only retry while permissions/startup are missing, for at most 30 seconds.
+    /// Menu/app activation/open are recovery points after that bounded window.
+    private func refreshPermissions(startRetry: Bool = true) {
+        guard enabled else { permissionTimer?.invalidate(); permissionTimer = nil; return }
+        if CGPreflightListenEventAccess() { if !monitor.isRunning { monitor.start() } }
+        else if monitor.isRunning { monitor.stop() }
+        if monitor.isRunning && AXIsProcessTrusted() {
+            permissionTimer?.invalidate(); permissionTimer = nil; permissionRetries = 0
+        } else if startRetry && permissionTimer == nil {
+            permissionRetries = 0
+            permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+                guard let self else { timer.invalidate(); return }
+                self.permissionRetries += 1
+                self.refreshPermissions(startRetry: false)
+                if self.permissionRetries >= 15 { timer.invalidate(); self.permissionTimer = nil }
+            }
+            permissionTimer?.tolerance = 0.5
+        }
+    }
 
     private func rebuildMenu() {
         guard let menu = statusItem.menu else { return }
@@ -95,6 +118,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add("Разрешить универсальный доступ…", action: #selector(requestAccessibility), to: menu)
         }
         menu.addItem(.separator())
+        let login = add("Запускать при входе в macOS", action: #selector(toggleLoginAtLaunch), to: menu)
+        login.state = loginAtLaunch.state
+        login.isEnabled = !loginAtLaunch.isChanging
+        login.toolTip = loginAtLaunch.statusDescription
+        if loginAtLaunch.state == .mixed {
+            add("Подтвердить автозапуск в настройках macOS…", action: #selector(openLoginSettings), to: menu)
+        }
+        if let error = loginAtLaunch.lastError { add(error, to: menu) }
+        menu.addItem(.separator())
         add("Проверить работу…", action: #selector(showDiagnostics), to: menu)
         add("Завершить SSwitcher", action: #selector(quit), to: menu)
     }
@@ -110,8 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleEnabled() {
         enabled.toggle()
         UserDefaults.standard.set(!enabled, forKey: "paused")
-        lastError = nil
-        if enabled { monitor.start() } else { monitor.stop() }
+        if enabled { refreshPermissions() } else { monitor.stop(); refreshPermissions() }
         rebuildMenu()
     }
 
@@ -120,12 +151,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !monitor.start(), let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
             NSWorkspace.shared.open(url)
         }
+        refreshPermissions()
         rebuildMenu()
     }
 
     @objc private func toggleSmoothReplacement() {
         ReplacementOverlay.enabled.toggle()
-        if !ReplacementOverlay.enabled { ReplacementOverlay.cancel() }
+        if !ReplacementOverlay.enabled { editor.overlay.cancel() }
         rebuildMenu()
     }
 
@@ -140,7 +172,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func quit() { NSApp.terminate(nil) }
 
+    @objc private func toggleLoginAtLaunch() {
+        loginAtLaunch.toggle { [weak self] in
+            guard let self else { return }
+            self.statusItem.button?.toolTip = self.loginAtLaunch.lastError ?? self.loginAtLaunch.statusDescription
+            self.rebuildMenu()
+        }
+        rebuildMenu()
+    }
+    @objc private func openLoginSettings() { loginAtLaunch.openSettings() }
+
     @objc private func showDiagnostics() {
+        refreshPermissions()
         if diagnosticsWindow == nil {
             diagnosticsWindow = DiagnosticsWindow(readStatus: { [weak self] in
                 guard let self else { return "" }
@@ -150,13 +193,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     "Отправка клавиш: \(CGPreflightPostEventAccess() ? "разрешена" : "не разрешена")",
                     "Слежение за клавишами: \(self.monitor.isRunning ? "работает" : "не запущено")",
                     "Событий Shift: \(self.monitor.shiftEventCount); двойных нажатий: \(self.monitor.doubleShiftCount)",
-                    "Доставленных событий вставки: \(self.monitor.syntheticEventCount)",
+                    "Синтетических событий клавиатуры: \(self.monitor.syntheticEventCount)",
+                    self.loginAtLaunch.statusDescription,
                     "Последняя попытка: \(self.lastAttempt)",
                     self.lastResult,
-                    TextEditor.diagnosticDetails,
-                    ReplacementOverlay.lastStatus
+                    self.editor.diagnosticDetails,
+                    self.editor.overlay.lastStatus,
+                    self.editor.performance.diagnosticStatus
                 ].joined(separator: "\n")
-            }, runCheck: { [weak self] in self?.monitor.onDoubleShift?() },
+            }, runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() },
                requestCapture: { [weak self] in self?.requestScreenCapture() })
         }
         diagnosticsWindow?.present()
@@ -168,14 +213,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+        refreshPermissions()
         rebuildMenu()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
-        ReplacementOverlay.cancel()
         monitor.stop()
+        editor.shutdown()
     }
 }
 
