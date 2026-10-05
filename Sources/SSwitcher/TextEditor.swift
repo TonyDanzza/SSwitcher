@@ -12,7 +12,7 @@ enum TextEditor {
     private static var isConverting = false
     static var diagnosticDetails = ""
     private static var pendingConversion: (() -> Void)?
-    private static var verifiedCanvasSelection: (pid: pid_t, text: String, isInputUnchanged: () -> Bool)?
+    private static var verifiedCanvasSelection: (pid: pid_t, text: String, word: WordCursorPlan?, isInputUnchanged: () -> Bool)?
 
     private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
@@ -236,7 +236,7 @@ enum TextEditor {
     }
 
     /// Canvas editors can expose neither numeric ranges nor text through AX.
-    /// Copy only the user's existing selection; never guess a caret position.
+    /// Figma caret words use keyboard selection confirmed by Copy before Paste.
     private static func copySelection(in app: NSRunningApplication, isInputUnchanged: @escaping () -> Bool, completion: @escaping (Outcome) -> Void) {
         diagnosticDetails = "Copy: \(app.localizedName ?? "")"
         guard let clipboard = PasteboardTransaction() else {
@@ -246,14 +246,24 @@ enum TextEditor {
         AXUIElementSetMessagingTimeout(application, 0.3)
         let originalFocus = focusedElement(in: app)
         var expectedSelectedText: String?
+        var wordPlan: WordCursorPlan?
+        var wordIsSelected = false
         if let previous = verifiedCanvasSelection,
            previous.pid == app.processIdentifier, previous.isInputUnchanged() {
             expectedSelectedText = previous.text
+            wordPlan = previous.word
         }
         verifiedCanvasSelection = nil
         if app.bundleIdentifier == "com.figma.Desktop", var candidate = originalFocus {
             for _ in 0..<6 {
                 if expectedSelectedText != nil { break }
+                if let range = selection(candidate), range.length == 0,
+                   let value = attribute(candidate, kAXValueAttribute) as? String,
+                   let plan = WordCursorPlan(value: value, caret: range.location) {
+                    wordPlan = plan
+                    expectedSelectedText = plan.text
+                    break
+                }
                 if let range = selection(candidate), range.length > 0,
                    let selected = attribute(candidate, kAXSelectedTextAttribute) as? String, !selected.isEmpty {
                     expectedSelectedText = selected
@@ -263,7 +273,7 @@ enum TextEditor {
                 candidate = parent as! AXUIElement
             }
             guard expectedSelectedText != nil else {
-                completion(.failure("В Figma выделите символы внутри редактируемого текста")); return
+                completion(.failure("В Figma поставьте курсор у слова или выделите текст")); return
             }
         }
         func stillValid() -> Bool {
@@ -279,33 +289,60 @@ enum TextEditor {
             }
             return true
         }
+        func finish(_ outcome: Outcome) {
+            if let plan = wordPlan, wordIsSelected, stillValid() {
+                let keys: [(CGKeyCode, CGEventFlags)] = [(124, [])] + Array(repeating: (123, []), count: plan.stepsToEnd)
+                if let events = KeyboardEvents.sequence(keys) { KeyboardEvents.post(events) }
+                // Let the editor apply the restored caret before a queued gesture.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { completion(outcome) }
+            } else { completion(outcome) }
+        }
+        if let plan = wordPlan {
+            let keys: [(CGKeyCode, CGEventFlags)] = Array(repeating: (124, []), count: plan.stepsToEnd)
+                + Array(repeating: (123, .maskShift), count: plan.selectionSteps)
+            guard stillValid(), let events = KeyboardEvents.sequence(keys) else {
+                completion(.failure("Не удалось выбрать слово у курсора")); return
+            }
+            KeyboardEvents.post(events)
+            wordIsSelected = true
+            diagnosticDetails += "; слово у курсора"
+        }
         guard stillValid(), clipboard.write("SSwitcher-copy-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
             clipboard.restore()
-            completion(.failure("Не удалось прочитать выделение")); return
+            finish(.failure("Не удалось прочитать выделение")); return
         }
         func awaitCopy(_ remaining: Int) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 guard stillValid() else {
                     clipboard.restore()
-                    completion(.failure("Ввод или активное поле изменились — повторите")); return
+                    finish(.failure("Ввод или активное поле изменились — повторите")); return
                 }
                 if !clipboard.hasCopyResult && remaining > 0 { awaitCopy(remaining - 1); return }
                 guard let selected = clipboard.acceptCopyResult(expectedSelectedText: expectedSelectedText), !selected.isEmpty else {
                     clipboard.restore()
-                    completion(.failure("Редактор скрывает курсор. Выделите символы текста и повторите")); return
+                    finish(.failure("Редактор скрывает курсор. Выделите символы текста и повторите")); return
+                }
+                guard wordPlan == nil || selected == expectedSelectedText else {
+                    clipboard.restore()
+                    finish(.failure("Редактор не подтвердил слово у курсора — текст не изменён")); return
                 }
                 guard let conversion = InputSources.prepare(selected) else {
                     clipboard.restore()
-                    completion(.failure("Добавьте английскую и русскую раскладки")); return
+                    finish(.failure("Добавьте английскую и русскую раскладки")); return
                 }
                 guard conversion.text != selected else {
                     clipboard.restore()
-                    completion(.failure("В выделении нет символов для преобразования")); return
+                    finish(.failure("В выделении нет символов для преобразования")); return
+                }
+                guard wordPlan == nil || wordPlan?.replacingText(with: conversion.text) != nil else {
+                    clipboard.restore()
+                    finish(.failure("Для этого слова выделите текст вручную")); return
                 }
                 guard stillValid(), clipboard.write(conversion.text), KeyboardEvents.command(9) else {
                     clipboard.restore()
-                    completion(.failure("Вставка отменена: поле или буфер обмена изменились")); return
+                    finish(.failure("Вставка отменена: поле или буфер обмена изменились")); return
                 }
+                wordIsSelected = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     if stillValid() {
                         TISSelectInputSource(conversion.target)
@@ -313,26 +350,29 @@ enum TextEditor {
                         // Paste collapses the user's selection; restore it from
                         // the caret so a second double Shift converts it back.
                         let keys = Array(repeating: (CGKeyCode(123), CGEventFlags.maskShift), count: conversion.text.count)
-                        if let events = KeyboardEvents.sequence(keys) { KeyboardEvents.post(events) }
+                        if let events = KeyboardEvents.sequence(keys) {
+                            KeyboardEvents.post(events)
+                            wordIsSelected = wordPlan != nil
+                        }
                     }
                     // Confirm the real editor selection, not its AX mirror.
                     // If it is missing, the next Copy will fail safely instead
                     // of reusing a stale AX range and inserting another word.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         guard stillValid(), clipboard.write("SSwitcher-verify-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
-                            clipboard.restore(); completion(.unverified); return
+                            clipboard.restore(); finish(.unverified); return
                         }
                         func verifyCopy(_ remaining: Int) {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                guard stillValid() else { clipboard.restore(); completion(.unverified); return }
+                                guard stillValid() else { clipboard.restore(); finish(.unverified); return }
                                 if !clipboard.hasCopyResult && remaining > 0 { verifyCopy(remaining - 1); return }
                                 let actual = clipboard.acceptCopyResult(expectedSelectedText: conversion.text)
                                 clipboard.restore()
                                 diagnosticDetails += actual == conversion.text ? "; выделение подтверждено Copy" : "; выделение не подтверждено"
                                 if actual == conversion.text, app.bundleIdentifier == "com.figma.Desktop" {
-                                    verifiedCanvasSelection = (app.processIdentifier, conversion.text, isInputUnchanged)
+                                    verifiedCanvasSelection = (app.processIdentifier, conversion.text, wordPlan?.replacingText(with: conversion.text), isInputUnchanged)
                                 }
-                                completion(actual == conversion.text ? .converted : .unverified)
+                                finish(actual == conversion.text ? .converted : .unverified)
                             }
                         }
                         verifyCopy(9)
