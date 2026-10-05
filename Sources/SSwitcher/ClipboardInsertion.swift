@@ -11,9 +11,13 @@ final class ClipboardInsertion {
         self.transaction = transaction
     }
 
-    func paste(_ text: String) -> Bool {
+    func paste(_ text: String, deletingBeforeCaret count: Int = 0) -> Bool {
+        // Prepare the complete sequence and clipboard before deleting anything.
+        var keys = Array(repeating: (CGKeyCode(51), CGEventFlags()), count: count)
+        keys.append((9, .maskCommand))
+        guard let events = KeyboardEvents.sequence(keys) else { return false }
         guard transaction.write(text) else { return false }
-        guard KeyboardEvents.command(9) else { restore(); return false }
+        KeyboardEvents.post(events)
         return true
     }
 

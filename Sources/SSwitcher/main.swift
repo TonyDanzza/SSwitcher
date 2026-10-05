@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastResult = "Ожидание двойного Shift"
     private var activationObserver: NSObjectProtocol?
     private var permissionTimer: Timer?
+    private var diagnosticsWindow: DiagnosticsWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -58,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.monitor.start()
             }
         }
+        if CommandLine.arguments.contains("--check") { showDiagnostics() }
     }
 
     func menuWillOpen(_ menu: NSMenu) { rebuildMenu() }
@@ -81,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add("Разрешить универсальный доступ…", action: #selector(requestAccessibility), to: menu)
         }
         menu.addItem(.separator())
+        add("Проверить работу…", action: #selector(showDiagnostics), to: menu)
         add("Завершить SSwitcher", action: #selector(quit), to: menu)
     }
 
@@ -109,6 +112,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func showDiagnostics() {
+        if diagnosticsWindow == nil {
+            diagnosticsWindow = DiagnosticsWindow(readStatus: { [weak self] in
+                guard let self else { return "" }
+                return [
+                    "Универсальный доступ: \(AXIsProcessTrusted() ? "разрешён" : "не выдан")",
+                    "Мониторинг ввода: \(CGPreflightListenEventAccess() ? "разрешён" : "не выдан")",
+                    "Отправка клавиш: \(CGPreflightPostEventAccess() ? "разрешена" : "не разрешена")",
+                    "Слежение за клавишами: \(self.monitor.isRunning ? "работает" : "не запущено")",
+                    "Событий Shift: \(self.monitor.shiftEventCount); двойных нажатий: \(self.monitor.doubleShiftCount)",
+                    "Доставленных событий вставки: \(self.monitor.syntheticEventCount)",
+                    "Последняя попытка: \(self.lastAttempt)",
+                    self.lastResult,
+                    TextEditor.diagnosticDetails
+                ].joined(separator: "\n")
+            }, runCheck: { [weak self] in self?.monitor.onDoubleShift?() })
+        }
+        diagnosticsWindow?.present()
+    }
 
     @objc private func requestAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary

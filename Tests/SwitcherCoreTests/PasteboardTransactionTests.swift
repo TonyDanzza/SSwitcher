@@ -71,4 +71,37 @@ final class PasteboardTransactionTests: XCTestCase {
         transaction.restore()
         XCTAssertEqual(pasteboard.string(forType: .string), "original")
     }
+
+    func testVerificationCopyPreservesOriginalClipboard() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        XCTAssertTrue(transaction.write("copy probe"))
+        pasteboard.clearContents()
+        pasteboard.setString("ghbdtn", forType: .string)
+        XCTAssertEqual(transaction.acceptCopyResult(), "ghbdtn")
+        XCTAssertTrue(transaction.write("привет"))
+        XCTAssertTrue(transaction.write("verification probe"))
+        XCTAssertFalse(transaction.hasCopyResult)
+        XCTAssertNil(transaction.acceptCopyResult())
+        pasteboard.clearContents()
+        pasteboard.setString("привет", forType: .string)
+        XCTAssertEqual(transaction.acceptCopyResult(), "привет")
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testFigmaStyledTextRequiresMatchingEditorSelection() throws {
+        for expected in [nil, "other text", "каждого"] as [String?] {
+            pasteboard.clearContents()
+            pasteboard.setString("original", forType: .string)
+            let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+            XCTAssertTrue(transaction.write("copy probe"))
+            pasteboard.clearContents()
+            pasteboard.setString("каждого", forType: .string)
+            pasteboard.setString("<span data-buffer=\"styled text\"></span>", forType: .html)
+            XCTAssertEqual(transaction.acceptCopyResult(expectedSelectedText: expected), expected == "каждого" ? "каждого" : nil)
+            transaction.restore()
+            XCTAssertEqual(pasteboard.string(forType: .string), "original")
+        }
+    }
 }

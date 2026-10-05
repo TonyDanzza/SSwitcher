@@ -37,13 +37,19 @@ public final class PasteboardTransaction {
 
     /// Call only after our Copy command, with unchanged app focus and no user
     /// input. The copied value becomes ours to restore after conversion.
-    public func acceptCopyResult() -> String? {
+    public func acceptCopyResult(expectedSelectedText: String? = nil) -> String? {
         guard hasCopyResult else { return nil }
         writtenChangeCount = pasteboard.changeCount
-        // Figma object copies contain serialized scene data, not selected text.
+        let plainText = pasteboard.string(forType: .string)
+        // Figma includes scene metadata even when copying styled characters.
+        // Accept it only when a text editor selection independently matches;
+        // copying a canvas object must not be mistaken for selected characters.
         if let html = pasteboard.string(forType: .html),
-           html.contains("<!--(figma)") || html.contains("data-buffer=") { return nil }
-        return pasteboard.string(forType: .string)
+           html.contains("<!--(figma)") || html.contains("data-buffer=") {
+            guard let expectedSelectedText, !expectedSelectedText.isEmpty,
+                  plainText == expectedSelectedText else { return nil }
+        }
+        return plainText
     }
 
     public func restore() {

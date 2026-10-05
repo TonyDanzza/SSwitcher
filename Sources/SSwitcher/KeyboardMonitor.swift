@@ -4,6 +4,9 @@ import SwitcherCore
 final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
     private(set) var inputGeneration: UInt64 = 0
+    private(set) var shiftEventCount = 0
+    private(set) var doubleShiftCount = 0
+    private(set) var syntheticEventCount = 0
     private var detector = DoubleShiftDetector()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -51,16 +54,23 @@ final class KeyboardMonitor {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
-        guard event.getIntegerValueField(.eventSourceUserData) != KeyboardEvents.marker else { return }
-        inputGeneration &+= 1
-        guard type == .flagsChanged else { detector.cancelGesture(); return }
+        if event.getIntegerValueField(.eventSourceUserData) == KeyboardEvents.marker {
+            syntheticEventCount += 1
+            return
+        }
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        // A second double Shift must not cancel selection restoration from the
+        // first conversion. Actual typing, clicks and other modifiers still do.
+        if type != .flagsChanged || (key != 56 && key != 60) { inputGeneration &+= 1 }
+        guard type == .flagsChanged else { detector.cancelGesture(); return }
+        if key == 56 || key == 60 { shiftEventCount += 1 }
         let otherModifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskSecondaryFn]
         if detector.shiftChanged(
             key: key, anyShiftDown: event.flags.contains(.maskShift),
             otherModifierDown: !event.flags.intersection(otherModifiers).isEmpty,
             time: Double(event.timestamp) / 1_000_000_000
         ) {
+            doubleShiftCount += 1
             // Keep the event-tap callback short; switch on the next main-loop turn.
             let generation = inputGeneration
             DispatchQueue.main.async { [weak self] in
