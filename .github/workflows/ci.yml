@@ -1,0 +1,17 @@
+name: Build and test
+on: [push, pull_request]
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test double-Shift detection
+        run: swift test
+      - name: Build app
+        run: bash scripts/build-app.sh
+      - name: Package app
+        run: ditto -c -k --sequesterRsrc --keepParent build/SSwitcher.app build/SSwitcher.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SSwitcher-macOS
+          path: build/SSwitcher.zip
