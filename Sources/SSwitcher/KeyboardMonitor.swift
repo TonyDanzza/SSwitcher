@@ -3,6 +3,7 @@ import SwitcherCore
 
 final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
+    private(set) var inputGeneration: UInt64 = 0
     private var detector = DoubleShiftDetector()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -50,6 +51,8 @@ final class KeyboardMonitor {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
+        guard event.getIntegerValueField(.eventSourceUserData) != KeyboardEvents.marker else { return }
+        inputGeneration &+= 1
         guard type == .flagsChanged else { detector.cancelGesture(); return }
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let otherModifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskSecondaryFn]
@@ -59,7 +62,11 @@ final class KeyboardMonitor {
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             // Keep the event-tap callback short; switch on the next main-loop turn.
-            DispatchQueue.main.async { [weak self] in self?.onDoubleShift?() }
+            let generation = inputGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.inputGeneration == generation else { return }
+                self.onDoubleShift?()
+            }
         }
     }
 

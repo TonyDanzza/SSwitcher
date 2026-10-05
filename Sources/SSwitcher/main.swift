@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let monitor = KeyboardMonitor()
     private var enabled = !UserDefaults.standard.bool(forKey: "paused")
     private var lastError: String?
+    private var lastAttempt = "Ещё не срабатывал"
+    private var lastResult = "Ожидание двойного Shift"
+    private var activationObserver: NSObjectProtocol?
     private var permissionTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -17,10 +20,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled else { return }
-            self.lastError = TextEditor.convertAtCursor()
-            self.statusItem.button?.toolTip = self.lastError ?? "SSwitcher — двойной Shift исправляет раскладку текста"
-            if self.lastError != nil { NSSound.beep() }
+            self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+            self.lastResult = "Проверяю поле ввода…"
+            let generation = self.monitor.inputGeneration
+            TextEditor.convertAtCursor(isInputUnchanged: { [weak self] in
+                self?.monitor.inputGeneration == generation
+            }) { [weak self] outcome in
+                guard let self else { return }
+                self.lastError = nil
+                switch outcome {
+                case .converted: self.lastResult = "Текст заменён — подтверждено редактором"
+                case .unverified: self.lastResult = "Вставка отправлена; редактор не подтвердил результат"
+                case .failure(let message):
+                    self.lastError = message
+                    self.lastResult = message
+                    NSSound.beep()
+                }
+                self.statusItem.button?.toolTip = self.lastResult
+            }
         }
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { notification in
+            if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                TextEditor.prepareAccessibility(for: app)
+            }
+        }
+        if let app = NSWorkspace.shared.frontmostApplication { TextEditor.prepareAccessibility(for: app) }
         if enabled { monitor.start() }
         rebuildMenu()
         // Also pick up permission granted while System Settings is open.
@@ -39,12 +65,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         guard let menu = statusItem.menu else { return }
         menu.removeAllItems()
-        add("SSwitcher", to: menu)
+        add("SSwitcher \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")", to: menu)
         add("Раскладка: \(InputSources.currentName)", to: menu)
         add(enabled ? (monitor.isRunning && AXIsProcessTrusted() ? "Двойной Shift включён" : "Нужны разрешения macOS") : "На паузе", to: menu)
         menu.addItem(.separator())
         add("Двойной Shift: слово или выделенный текст", to: menu)
-        if let lastError { add(lastError, to: menu) }
+        add("Последний двойной Shift: \(lastAttempt)", to: menu)
+        add(lastResult, to: menu)
         let toggle = add("Исправлять по двойному Shift", action: #selector(toggleEnabled), to: menu)
         toggle.state = enabled ? .on : .off
         if !monitor.isRunning && enabled {
@@ -94,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionTimer?.invalidate()
+        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         monitor.stop()
     }
 }
