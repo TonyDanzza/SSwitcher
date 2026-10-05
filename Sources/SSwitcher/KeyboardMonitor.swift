@@ -3,6 +3,9 @@ import SwitcherCore
 
 final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
+    var canStartConversion: (() -> Bool)?
+    private var burst = ShiftBurstGate()
+    private var pendingDispatch: DispatchWorkItem?
     private(set) var inputGeneration: UInt64 = 0
     private(set) var shiftEventCount = 0
     private(set) var doubleShiftCount = 0
@@ -41,6 +44,10 @@ final class KeyboardMonitor {
     }
 
     func stop() {
+        inputGeneration &+= 1
+        pendingDispatch?.cancel()
+        pendingDispatch = nil
+        burst.cancel()
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         tap = nil
@@ -51,6 +58,9 @@ final class KeyboardMonitor {
     private func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             detector.reset()
+            burst.cancel()
+            pendingDispatch?.cancel()
+            inputGeneration &+= 1
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
@@ -61,9 +71,17 @@ final class KeyboardMonitor {
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         // A second double Shift must not cancel selection restoration from the
         // first conversion. Actual typing, clicks and other modifiers still do.
-        if type != .flagsChanged || (key != 56 && key != 60) { inputGeneration &+= 1 }
+        if type != .flagsChanged || (key != 56 && key != 60) {
+            inputGeneration &+= 1
+            burst.cancel()
+            pendingDispatch?.cancel()
+        }
         guard type == .flagsChanged else { detector.cancelGesture(); return }
-        if key == 56 || key == 60 { shiftEventCount += 1 }
+        if key == 56 || key == 60 {
+            shiftEventCount += 1
+            burst.shiftChanged(down: event.flags.contains(.maskShift), at: ProcessInfo.processInfo.systemUptime)
+            pendingDispatch?.cancel()
+        }
         let otherModifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskSecondaryFn]
         if detector.shiftChanged(
             key: key, anyShiftDown: event.flags.contains(.maskShift),
@@ -71,13 +89,18 @@ final class KeyboardMonitor {
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             doubleShiftCount += 1
-            // Keep the event-tap callback short; switch on the next main-loop turn.
-            let generation = inputGeneration
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.inputGeneration == generation else { return }
-                self.onDoubleShift?()
-            }
+            if canStartConversion?() != false { burst.request() }
         }
+        guard burst.pending, !event.flags.contains(.maskShift) else { return }
+        let generation = inputGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.inputGeneration == generation,
+                  self.burst.consume(at: ProcessInfo.processInfo.systemUptime),
+                  self.canStartConversion?() != false else { return }
+            self.onDoubleShift?()
+        }
+        pendingDispatch = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + burst.quietInterval + 0.005, execute: work)
     }
 
     deinit { stop() }

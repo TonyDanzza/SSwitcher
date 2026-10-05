@@ -10,9 +10,9 @@ enum TextEditor {
         case failure(String)
     }
 
-    private static var isConverting = false
+    private(set) static var isConverting = false
     static var diagnosticDetails = ""
-    private static var pendingConversion: (() -> Void)?
+    private static var unconfirmedInput: (() -> Bool)?
     private static var verifiedCanvasSelection: (pid: pid_t, text: String, isInputUnchanged: () -> Bool)?
 
     private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -65,16 +65,11 @@ enum TextEditor {
     }
 
     static func convertAtCursor(isInputUnchanged: @escaping () -> Bool, completion: @escaping (Outcome) -> Void) {
-        if isConverting {
-            let pid = targetApplication()?.processIdentifier
-            pendingConversion = {
-                guard isInputUnchanged(), targetApplication()?.processIdentifier == pid else {
-                    completion(.failure("Ввод или активное поле изменились — повторите")); return
-                }
-                convertAtCursor(isInputUnchanged: isInputUnchanged, completion: completion)
-            }
-            return
+        guard !isConverting else { completion(.ignored); return }
+        if unconfirmedInput?() == true {
+            completion(.failure("Предыдущая замена не подтверждена. Проверьте текст и поставьте курсор заново")); return
         }
+        unconfirmedInput = nil
         guard AXIsProcessTrusted() else { completion(.failure("Разрешите «Универсальный доступ» в меню SSwitcher")); return }
         guard !IsSecureEventInputEnabled() else { completion(.failure("Преобразование недоступно при защищённом вводе")); return }
         guard let app = targetApplication() else { completion(.failure("Нет активного приложения")); return }
@@ -84,11 +79,9 @@ enum TextEditor {
         // AX is normally ready from the activation observer; do not add a fixed delay.
         DispatchQueue.main.async {
             let finish: (Outcome) -> Void = { outcome in
+                if case .unverified = outcome { unconfirmedInput = isInputUnchanged }
                 isConverting = false
                 completion(outcome)
-                let next = pendingConversion
-                pendingConversion = nil
-                next?()
             }
             if let error = beginConversion(in: app, isInputUnchanged: isInputUnchanged, completion: finish) { finish(.failure(error)) }
         }
@@ -171,6 +164,11 @@ enum TextEditor {
         let expectedDocument = (originalDocument as NSString).replacingCharacters(in: targetRange, with: conversion.text)
         // No AX range setters, arrows, Shift-selection, or Copy in the word path.
         // Prepare the complete clipboard and event sequence before any deletion.
+        let heldModifiers = CGEventSource.flagsState(.combinedSessionState)
+        let unsafeModifiers: CGEventFlags = [.maskShift, .maskCommand, .maskControl, .maskAlternate]
+        guard heldModifiers.intersection(unsafeModifiers).isEmpty else {
+            completion(.ignored); return nil
+        }
         guard clipboard.paste(conversion.text, deletingBeforeCaret: plan.selectionSteps) else {
             return "Не удалось отправить замену текста"
         }

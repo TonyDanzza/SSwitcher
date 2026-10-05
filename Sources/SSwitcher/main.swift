@@ -13,14 +13,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "⇧⇧"
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.button?.image = BrandIcon.menuImage()
+        statusItem.button?.imagePosition = .imageOnly
+        statusItem.button?.setAccessibilityLabel("SSwitcher — исправление раскладки")
         statusItem.button?.toolTip = "SSwitcher — двойной Shift исправляет раскладку текста"
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        monitor.canStartConversion = { !TextEditor.isConverting }
         monitor.onDoubleShift = { [weak self] in
-            guard let self, self.enabled else { return }
+            guard let self, self.enabled, !TextEditor.isConverting else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             self.lastResult = "Проверяю поле ввода…"
             let generation = self.monitor.inputGeneration
