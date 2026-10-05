@@ -4,6 +4,7 @@ import SwitcherCore
 
 enum TextEditor {
     enum Outcome {
+        case ignored
         case converted
         case unverified
         case failure(String)
@@ -12,7 +13,7 @@ enum TextEditor {
     private static var isConverting = false
     static var diagnosticDetails = ""
     private static var pendingConversion: (() -> Void)?
-    private static var verifiedCanvasSelection: (pid: pid_t, text: String, word: WordCursorPlan?, isInputUnchanged: () -> Bool)?
+    private static var verifiedCanvasSelection: (pid: pid_t, text: String, isInputUnchanged: () -> Bool)?
 
     private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
@@ -78,9 +79,10 @@ enum TextEditor {
         guard !IsSecureEventInputEnabled() else { completion(.failure("Преобразование недоступно при защищённом вводе")); return }
         guard let app = targetApplication() else { completion(.failure("Нет активного приложения")); return }
         isConverting = true
+        diagnosticDetails = ""
         prepareAccessibility(for: app)
-        // Allow a lazy renderer accessibility tree to become available.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+        // AX is normally ready from the activation observer; do not add a fixed delay.
+        DispatchQueue.main.async {
             let finish: (Outcome) -> Void = { outcome in
                 isConverting = false
                 completion(outcome)
@@ -95,14 +97,6 @@ enum TextEditor {
     private static func beginConversion(in app: NSRunningApplication, isInputUnchanged: @escaping () -> Bool, completion: @escaping (Outcome) -> Void) -> String? {
         guard isInputUnchanged(), targetApplication()?.processIdentifier == app.processIdentifier else {
             return "Активное приложение изменилось — повторите"
-        }
-        // Figma's AX document selection can differ from its canvas selection.
-        // Setting an AX range may update the accessibility mirror only; Paste
-        // then inserts at the canvas caret. Use the editor's own Copy command
-        // as the source of truth and keyboard selection for this application.
-        if app.bundleIdentifier == "com.figma.Desktop" {
-            copySelection(in: app, isInputUnchanged: isInputUnchanged, completion: completion)
-            return nil
         }
         let application = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.5)
@@ -125,118 +119,84 @@ enum TextEditor {
             copySelection(in: app, isInputUnchanged: isInputUnchanged, completion: completion)
             return nil
         }
-        diagnosticDetails = "AX: \(app.localizedName ?? ""); диапазон \(selectedRange.location):\(selectedRange.length)"
-        var targetRange = selectedRange
-        let original: String
-        if selectedRange.length > 0, let selected = attribute(element, kAXSelectedTextAttribute) as? String, !selected.isEmpty {
-            original = selected
-        } else {
-            guard let value = attribute(element, kAXValueAttribute) as? String else {
-                copySelection(in: app, isInputUnchanged: isInputUnchanged, completion: completion)
-                return nil
-            }
-            let string = value as NSString
-            guard selectedRange.location <= string.length,
-                  selectedRange.length <= string.length - selectedRange.location else { return "Положение курсора изменилось — повторите" }
-            if selectedRange.length > 0 {
-                original = string.substring(with: NSRange(location: selectedRange.location, length: selectedRange.length))
-            } else {
-                guard let range = TextConversion.tokenRange(in: value, caret: selectedRange.location) else { return "Рядом с курсором нет слова" }
-                targetRange = CFRange(location: range.location, length: range.length)
-                original = string.substring(with: range)
-            }
+        // Figma's own selection survives Paste, while its AX mirror may not.
+        if app.bundleIdentifier == "com.figma.Desktop",
+           let previous = verifiedCanvasSelection,
+           previous.pid == app.processIdentifier, previous.isInputUnchanged() {
+            copySelection(in: app, isInputUnchanged: isInputUnchanged, completion: completion)
+            return nil
         }
-        guard let conversion = InputSources.prepare(original) else {
-            return "Добавьте английскую и русскую раскладки в настройках клавиатуры"
+        if selectedRange.length > 0 {
+            copySelection(in: app, isInputUnchanged: isInputUnchanged, completion: completion)
+            return nil
         }
-        guard conversion.text != original else { return "В выбранном фрагменте нет символов для преобразования" }
-        guard let clipboard = ClipboardInsertion() else { return "Не удалось сохранить текущий буфер обмена" }
-
+        verifiedCanvasSelection = nil
+        guard let originalDocument = attribute(element, kAXValueAttribute) as? String else {
+            return "Редактор не предоставляет текст у курсора"
+        }
+        var editable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &editable) == .success,
+              editable.boolValue else { return "Это поле не подтверждает возможность редактирования" }
+        guard let plan = WordCursorPlan(value: originalDocument, caret: selectedRange.location) else {
+            completion(.ignored)
+            return nil
+        }
+        guard let conversion = InputSources.prepare(plan.text) else {
+            return "Добавьте английскую и русскую раскладки"
+        }
+        guard conversion.text != plan.text else { completion(.ignored); return nil }
+        guard plan.replacingText(with: conversion.text) != nil else {
+            return "Для этого слова выделите текст вручную"
+        }
+        guard let clipboard = ClipboardInsertion() else { return "Не удалось сохранить буфер обмена" }
+        let started = ProcessInfo.processInfo.systemUptime
+        diagnosticDetails = "Без выделения: \(app.localizedName ?? "")"
         func sameFocus() -> Bool {
-            guard isInputUnchanged(), targetApplication()?.processIdentifier == app.processIdentifier,
-                  let current = focusedElement(in: app) else { return false }
+            guard isInputUnchanged() else { return false }
+            // No remote AX focus round trips during Figma verification. Its
+            // document is already captured, and real input invalidates this run.
+            if app.bundleIdentifier == "com.figma.Desktop" {
+                return NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+            }
+            guard targetApplication()?.processIdentifier == app.processIdentifier else { return false }
+            guard let current = focusedElement(in: app) else { return false }
             return CFEqual(current, focused)
         }
-        guard sameFocus(), let current = selection(element),
-              current.location == selectedRange.location, current.length == selectedRange.length else {
-            return "Курсор или выделение изменились — повторите"
+        guard sameFocus(), let current = selection(element), current.length == 0,
+              current.location == selectedRange.location,
+              attribute(element, kAXValueAttribute) as? String == originalDocument else {
+            return "Курсор или текст изменились — повторите"
         }
-        // Ordinary words can be replaced with Backspace + Paste without showing
-        // a selection. Use range replacement for complex Unicode clusters:
-        // editors disagree on how many Backspaces delete an emoji/combining mark.
-        let withoutSelection = selectedRange.length == 0 && original.utf16.count == original.count && original.count <= 256
-        let deletionCount = withoutSelection ? original.count : 0
-        var insertionRange = withoutSelection
-            ? CFRange(location: targetRange.location + targetRange.length, length: 0)
-            : targetRange
-        if selectedRange.length == 0 {
-            guard let value = AXValueCreate(.cfRange, &insertionRange),
-                  AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success else {
-                return "Это поле не позволяет переместить курсор через macOS Accessibility"
-            }
+        let targetRange = NSRange(location: selectedRange.location - plan.text.utf16.count, length: plan.text.utf16.count)
+        let expectedDocument = (originalDocument as NSString).replacingCharacters(in: targetRange, with: conversion.text)
+        // No AX range setters, arrows, Shift-selection, or Copy in the word path.
+        // Prepare the complete clipboard and event sequence before any deletion.
+        guard clipboard.paste(conversion.text, deletingBeforeCaret: plan.selectionSteps) else {
+            return "Не удалось отправить замену текста"
         }
-        // AX selection changes in web renderers can be asynchronous. Never paste
-        // until the exact intended range is acknowledged by the target editor.
-        func waitForSelection(_ attempt: Int) {
-            guard sameFocus() else { completion(.failure("Активное поле изменилось — повторите")); return }
-            guard let current = selection(element), current.location == insertionRange.location, current.length == insertionRange.length else {
-                if attempt < 4 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { waitForSelection(attempt + 1) }
-                } else { completion(.failure("Редактор не подтвердил положение курсора")) }
-                return
-            }
-            if withoutSelection && text(in: element, range: targetRange) != original {
-                completion(.failure("Текст изменился — повторите")); return
-            }
-            guard clipboard.paste(conversion.text, deletingBeforeCaret: deletionCount) else { completion(.failure("Не удалось вставить преобразованный текст")); return }
-            verifyInsertion(remaining: 8)
-        }
-        func verifyInsertion(remaining: Int) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                // Never read another field or change its input source if focus moved.
-                guard sameFocus() else {
+        func verify(_ remaining: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                guard sameFocus() else { clipboard.restore(); completion(.unverified); return }
+                if attribute(element, kAXValueAttribute) as? String == expectedDocument {
                     clipboard.restore()
-                    completion(.unverified)
-                    return
-                }
-                let actual = text(in: element, range: CFRange(location: targetRange.location, length: (conversion.text as NSString).length))
-                if actual == conversion.text {
-                    if selectedRange.length > 0, sameFocus() {
-                        var restoredSelection = CFRange(location: targetRange.location, length: (conversion.text as NSString).length)
-                        if let value = AXValueCreate(.cfRange, &restoredSelection) {
-                            AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
-                        }
-                    } else if withoutSelection, sameFocus(), let caret = selection(element),
-                       caret.length == 0, caret.location == targetRange.location + (conversion.text as NSString).length {
-                        var restoredCaret = CFRange(location: min(selectedRange.location, caret.location), length: 0)
-                        if let value = AXValueCreate(.cfRange, &restoredCaret) {
-                            AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
-                        }
-                    }
-                    // Give the receiving app time to finish handling Paste before
-                    // restoring the clipboard, even if AX updates immediately.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        if let current = selection(element) {
-                            diagnosticDetails += "; после \(current.location):\(current.length)"
-                        }
-                        clipboard.restore()
-                        if sameFocus() { TISSelectInputSource(conversion.target) }
-                        completion(.converted)
-                    }
+                    TISSelectInputSource(conversion.target)
+                    let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+                    diagnosticDetails += "; подтверждено за \(elapsed) мс"
+                    completion(.converted)
                 } else if remaining > 0 {
-                    verifyInsertion(remaining: remaining - 1)
+                    verify(remaining - 1)
                 } else {
                     clipboard.restore()
-                    completion(actual == nil ? .unverified : .failure("Редактор не заменил текст. Попробуйте выделить его вручную"))
+                    completion(.unverified)
                 }
             }
         }
-        waitForSelection(0)
+        verify(24)
         return nil
     }
 
     /// Canvas editors can expose neither numeric ranges nor text through AX.
-    /// Figma caret words use keyboard selection confirmed by Copy before Paste.
+    /// Copy only the user's existing selection; never guess a caret position.
     private static func copySelection(in app: NSRunningApplication, isInputUnchanged: @escaping () -> Bool, completion: @escaping (Outcome) -> Void) {
         diagnosticDetails = "Copy: \(app.localizedName ?? "")"
         guard let clipboard = PasteboardTransaction() else {
@@ -246,24 +206,14 @@ enum TextEditor {
         AXUIElementSetMessagingTimeout(application, 0.3)
         let originalFocus = focusedElement(in: app)
         var expectedSelectedText: String?
-        var wordPlan: WordCursorPlan?
-        var wordIsSelected = false
         if let previous = verifiedCanvasSelection,
            previous.pid == app.processIdentifier, previous.isInputUnchanged() {
             expectedSelectedText = previous.text
-            wordPlan = previous.word
         }
         verifiedCanvasSelection = nil
         if app.bundleIdentifier == "com.figma.Desktop", var candidate = originalFocus {
             for _ in 0..<6 {
                 if expectedSelectedText != nil { break }
-                if let range = selection(candidate), range.length == 0,
-                   let value = attribute(candidate, kAXValueAttribute) as? String,
-                   let plan = WordCursorPlan(value: value, caret: range.location) {
-                    wordPlan = plan
-                    expectedSelectedText = plan.text
-                    break
-                }
                 if let range = selection(candidate), range.length > 0,
                    let selected = attribute(candidate, kAXSelectedTextAttribute) as? String, !selected.isEmpty {
                     expectedSelectedText = selected
@@ -273,7 +223,7 @@ enum TextEditor {
                 candidate = parent as! AXUIElement
             }
             guard expectedSelectedText != nil else {
-                completion(.failure("В Figma поставьте курсор у слова или выделите текст")); return
+                completion(.failure("В Figma выделите символы внутри редактируемого текста")); return
             }
         }
         func stillValid() -> Bool {
@@ -289,60 +239,33 @@ enum TextEditor {
             }
             return true
         }
-        func finish(_ outcome: Outcome) {
-            if let plan = wordPlan, wordIsSelected, stillValid() {
-                let keys: [(CGKeyCode, CGEventFlags)] = [(124, [])] + Array(repeating: (123, []), count: plan.stepsToEnd)
-                if let events = KeyboardEvents.sequence(keys) { KeyboardEvents.post(events) }
-                // Let the editor apply the restored caret before a queued gesture.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { completion(outcome) }
-            } else { completion(outcome) }
-        }
-        if let plan = wordPlan {
-            let keys: [(CGKeyCode, CGEventFlags)] = Array(repeating: (124, []), count: plan.stepsToEnd)
-                + Array(repeating: (123, .maskShift), count: plan.selectionSteps)
-            guard stillValid(), let events = KeyboardEvents.sequence(keys) else {
-                completion(.failure("Не удалось выбрать слово у курсора")); return
-            }
-            KeyboardEvents.post(events)
-            wordIsSelected = true
-            diagnosticDetails += "; слово у курсора"
-        }
         guard stillValid(), clipboard.write("SSwitcher-copy-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
             clipboard.restore()
-            finish(.failure("Не удалось прочитать выделение")); return
+            completion(.failure("Не удалось прочитать выделение")); return
         }
         func awaitCopy(_ remaining: Int) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 guard stillValid() else {
                     clipboard.restore()
-                    finish(.failure("Ввод или активное поле изменились — повторите")); return
+                    completion(.failure("Ввод или активное поле изменились — повторите")); return
                 }
                 if !clipboard.hasCopyResult && remaining > 0 { awaitCopy(remaining - 1); return }
                 guard let selected = clipboard.acceptCopyResult(expectedSelectedText: expectedSelectedText), !selected.isEmpty else {
                     clipboard.restore()
-                    finish(.failure("Редактор скрывает курсор. Выделите символы текста и повторите")); return
-                }
-                guard wordPlan == nil || selected == expectedSelectedText else {
-                    clipboard.restore()
-                    finish(.failure("Редактор не подтвердил слово у курсора — текст не изменён")); return
+                    completion(.failure("Редактор скрывает курсор. Выделите символы текста и повторите")); return
                 }
                 guard let conversion = InputSources.prepare(selected) else {
                     clipboard.restore()
-                    finish(.failure("Добавьте английскую и русскую раскладки")); return
+                    completion(.failure("Добавьте английскую и русскую раскладки")); return
                 }
                 guard conversion.text != selected else {
                     clipboard.restore()
-                    finish(.failure("В выделении нет символов для преобразования")); return
-                }
-                guard wordPlan == nil || wordPlan?.replacingText(with: conversion.text) != nil else {
-                    clipboard.restore()
-                    finish(.failure("Для этого слова выделите текст вручную")); return
+                    completion(.failure("В выделении нет символов для преобразования")); return
                 }
                 guard stillValid(), clipboard.write(conversion.text), KeyboardEvents.command(9) else {
                     clipboard.restore()
-                    finish(.failure("Вставка отменена: поле или буфер обмена изменились")); return
+                    completion(.failure("Вставка отменена: поле или буфер обмена изменились")); return
                 }
-                wordIsSelected = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     if stillValid() {
                         TISSelectInputSource(conversion.target)
@@ -350,29 +273,26 @@ enum TextEditor {
                         // Paste collapses the user's selection; restore it from
                         // the caret so a second double Shift converts it back.
                         let keys = Array(repeating: (CGKeyCode(123), CGEventFlags.maskShift), count: conversion.text.count)
-                        if let events = KeyboardEvents.sequence(keys) {
-                            KeyboardEvents.post(events)
-                            wordIsSelected = wordPlan != nil
-                        }
+                        if let events = KeyboardEvents.sequence(keys) { KeyboardEvents.post(events) }
                     }
                     // Confirm the real editor selection, not its AX mirror.
                     // If it is missing, the next Copy will fail safely instead
                     // of reusing a stale AX range and inserting another word.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         guard stillValid(), clipboard.write("SSwitcher-verify-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
-                            clipboard.restore(); finish(.unverified); return
+                            clipboard.restore(); completion(.unverified); return
                         }
                         func verifyCopy(_ remaining: Int) {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                guard stillValid() else { clipboard.restore(); finish(.unverified); return }
+                                guard stillValid() else { clipboard.restore(); completion(.unverified); return }
                                 if !clipboard.hasCopyResult && remaining > 0 { verifyCopy(remaining - 1); return }
                                 let actual = clipboard.acceptCopyResult(expectedSelectedText: conversion.text)
                                 clipboard.restore()
                                 diagnosticDetails += actual == conversion.text ? "; выделение подтверждено Copy" : "; выделение не подтверждено"
                                 if actual == conversion.text, app.bundleIdentifier == "com.figma.Desktop" {
-                                    verifiedCanvasSelection = (app.processIdentifier, conversion.text, wordPlan?.replacingText(with: conversion.text), isInputUnchanged)
+                                    verifiedCanvasSelection = (app.processIdentifier, conversion.text, isInputUnchanged)
                                 }
-                                finish(actual == conversion.text ? .converted : .unverified)
+                                completion(actual == conversion.text ? .converted : .unverified)
                             }
                         }
                         verifyCopy(9)
@@ -383,19 +303,4 @@ enum TextEditor {
         awaitCopy(9)
     }
 
-    private static func text(in element: AXUIElement, range: CFRange) -> String? {
-        var range = range
-        if let value = AXValueCreate(.cfRange, &range) {
-            var result: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, value, &result) == .success,
-               let string = result as? String { return string }
-        }
-        if let value = attribute(element, kAXValueAttribute) as? String {
-            let string = value as NSString
-            if range.location <= string.length && range.length <= string.length - range.location {
-                return string.substring(with: NSRange(location: range.location, length: range.length))
-            }
-        }
-        return nil
-    }
 }

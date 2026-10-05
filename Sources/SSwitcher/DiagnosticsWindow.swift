@@ -1,6 +1,6 @@
 import AppKit
 
-final class DiagnosticsWindow: NSWindowController {
+final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
     private let status = NSTextField(wrappingLabelWithString: "")
     private var timer: Timer?
     private let readStatus: () -> String
@@ -15,6 +15,7 @@ final class DiagnosticsWindow: NSWindowController {
         window.title = "Проверка SSwitcher"
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
         // AppKit routes Command-C/V through the main menu's responder actions.
         // A menu-bar-only app otherwise has no Edit menu for this test editor.
         if NSApp.mainMenu == nil {
@@ -63,17 +64,27 @@ final class DiagnosticsWindow: NSWindowController {
         scroll.heightAnchor.constraint(equalToConstant: 100).isActive = true
         content.addArrangedSubview(NSButton(title: "Проверить замену текста", target: self, action: #selector(check)))
         status.stringValue = readStatus()
+        window.center()
+    }
+
+    private func startUpdates() {
+        guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
             let value = self.readStatus()
             if self.status.stringValue != value { self.status.stringValue = value }
         }
-        window.center()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        timer?.invalidate()
+        timer = nil
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func present() {
+        startUpdates()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

@@ -12,8 +12,9 @@ public struct WordCursorPlan: Equatable {
               let caretRange = Range(NSRange(location: caret, length: 0), in: value),
               value.indices.contains(caretRange.lowerBound) || caretRange.lowerBound == value.endIndex,
               caretRange.lowerBound >= range.lowerBound, caretRange.lowerBound <= range.upperBound else { return nil }
+        guard caretRange.lowerBound == range.upperBound else { return nil }
         let word = String(value[range])
-        guard !word.isEmpty, word.count <= 256 else { return nil }
+        guard !word.isEmpty, word.count <= 256, word.utf16.count == word.count else { return nil }
         text = word
         stepsToEnd = value[caretRange.lowerBound..<range.upperBound].count
     }

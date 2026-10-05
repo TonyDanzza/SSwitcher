@@ -2,6 +2,7 @@ import Carbon
 import SwitcherCore
 
 enum InputSources {
+    private static var cachedMappings: [(from: CFData, to: CFData, keyboard: UInt32, value: [Character: String])] = []
     struct Conversion {
         let text: String
         let target: TISInputSource
@@ -52,6 +53,10 @@ enum InputSources {
             return Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
         }
         guard let fromData = data(from), let toData = data(to) else { return nil }
+        let keyboard = UInt32(LMGetKbdType())
+        if let cached = cachedMappings.first(where: { $0.keyboard == keyboard && CFEqual($0.from, fromData) && CFEqual($0.to, toData) }) {
+            return cached.value
+        }
         func character(_ data: CFData, key: UInt16, shifted: Bool) -> String? {
             guard let bytes = CFDataGetBytePtr(data) else { return nil }
             let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
@@ -59,7 +64,7 @@ enum InputSources {
             var length = 0
             var buffer = [UniChar](repeating: 0, count: 8)
             let status = UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown),
-                shifted ? UInt32(shiftKey >> 8) : 0, UInt32(LMGetKbdType()),
+                shifted ? UInt32(shiftKey >> 8) : 0, keyboard,
                 OptionBits(kUCKeyTranslateNoDeadKeysMask), &deadKey, buffer.count, &length, &buffer)
             guard status == noErr, length > 0 else { return nil }
             let result = String(utf16CodeUnits: buffer, count: length)
@@ -75,6 +80,8 @@ enum InputSources {
                 }
             }
         }
+        if cachedMappings.count >= 2 { cachedMappings.removeFirst() }
+        cachedMappings.append((fromData, toData, keyboard, result))
         return result
     }
 }

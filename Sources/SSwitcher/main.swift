@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return }
                 self.lastError = nil
                 switch outcome {
+                case .ignored: self.lastResult = "Курсор должен стоять в конце слова"
                 case .converted: self.lastResult = "Текст заменён — подтверждено редактором"
                 case .unverified: self.lastResult = "Вставка отправлена; редактор не подтвердил результат"
                 case .failure(let message):
@@ -59,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.monitor.start()
             }
         }
+        permissionTimer?.tolerance = 0.5
         if CommandLine.arguments.contains("--check") { showDiagnostics() }
     }
 
