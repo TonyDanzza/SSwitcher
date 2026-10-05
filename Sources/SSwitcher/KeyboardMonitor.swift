@@ -3,6 +3,7 @@ import SwitcherCore
 
 final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
+    var onUserActivity: (() -> Void)?
     var canStartConversion: (() -> Bool)?
     private var burst = ShiftBurstGate()
     private var pendingDispatch: DispatchWorkItem?
@@ -19,7 +20,7 @@ final class KeyboardMonitor {
     func start() -> Bool {
         if isRunning { return true }
         guard CGPreflightListenEventAccess() else { return false }
-        let types: [CGEventType] = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let types: [CGEventType] = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
@@ -68,6 +69,7 @@ final class KeyboardMonitor {
             syntheticEventCount += 1
             return
         }
+        onUserActivity?()
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         // A second double Shift must not cancel selection restoration from the
         // first conversion. Actual typing, clicks and other modifiers still do.

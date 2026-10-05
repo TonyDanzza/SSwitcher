@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        monitor.onUserActivity = { ReplacementOverlay.cancel() }
         monitor.canStartConversion = { !TextEditor.isConverting }
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled, !TextEditor.isConverting else { return }
@@ -47,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { notification in
+            ReplacementOverlay.cancel()
             if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
                 TextEditor.prepareAccessibility(for: app)
             }
@@ -81,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(lastResult, to: menu)
         let toggle = add("Исправлять по двойному Shift", action: #selector(toggleEnabled), to: menu)
         toggle.state = enabled ? .on : .off
+        let smooth = add("Плавная замена", action: #selector(toggleSmoothReplacement), to: menu)
+        smooth.state = ReplacementOverlay.enabled ? .on : .off
+        if ReplacementOverlay.enabled && !CGPreflightScreenCaptureAccess() {
+            add("Разрешить запись экрана для анимации…", action: #selector(requestScreenCapture), to: menu)
+        }
         if !monitor.isRunning && enabled {
             add("Разрешить мониторинг ввода…", action: #selector(requestPermission), to: menu)
         }
@@ -116,6 +123,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
+    @objc private func toggleSmoothReplacement() {
+        ReplacementOverlay.enabled.toggle()
+        if !ReplacementOverlay.enabled { ReplacementOverlay.cancel() }
+        rebuildMenu()
+    }
+
+    @objc private func requestScreenCapture() {
+        if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+        if !CGPreflightScreenCaptureAccess(),
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+        rebuildMenu()
+    }
+
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func showDiagnostics() {
@@ -131,9 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     "Доставленных событий вставки: \(self.monitor.syntheticEventCount)",
                     "Последняя попытка: \(self.lastAttempt)",
                     self.lastResult,
-                    TextEditor.diagnosticDetails
+                    TextEditor.diagnosticDetails,
+                    ReplacementOverlay.lastStatus
                 ].joined(separator: "\n")
-            }, runCheck: { [weak self] in self?.monitor.onDoubleShift?() })
+            }, runCheck: { [weak self] in self?.monitor.onDoubleShift?() },
+               requestCapture: { [weak self] in self?.requestScreenCapture() })
         }
         diagnosticsWindow?.present()
     }
@@ -150,6 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+        ReplacementOverlay.cancel()
         monitor.stop()
     }
 }

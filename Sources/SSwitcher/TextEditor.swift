@@ -145,15 +145,16 @@ enum TextEditor {
         let started = ProcessInfo.processInfo.systemUptime
         diagnosticDetails = "Без выделения: \(app.localizedName ?? "")"
         func sameFocus() -> Bool {
-            guard isInputUnchanged() else { return false }
+            guard isInputUnchanged() else { diagnosticDetails += "; новый ввод"; return false }
             // No remote AX focus round trips during Figma verification. Its
             // document is already captured, and real input invalidates this run.
             if app.bundleIdentifier == "com.figma.Desktop" {
                 return NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
             }
-            guard targetApplication()?.processIdentifier == app.processIdentifier else { return false }
-            guard let current = focusedElement(in: app) else { return false }
-            return CFEqual(current, focused)
+            guard targetApplication()?.processIdentifier == app.processIdentifier else { diagnosticDetails += "; другая программа"; return false }
+            guard let current = focusedElement(in: app) else { diagnosticDetails += "; нет фокуса"; return false }
+            if !CFEqual(current, focused) { diagnosticDetails += "; другое поле"; return false }
+            return true
         }
         guard sameFocus(), let current = selection(element), current.length == 0,
               current.location == selectedRange.location,
@@ -162,34 +163,44 @@ enum TextEditor {
         }
         let targetRange = NSRange(location: selectedRange.location - plan.text.utf16.count, length: plan.text.utf16.count)
         let expectedDocument = (originalDocument as NSString).replacingCharacters(in: targetRange, with: conversion.text)
-        // No AX range setters, arrows, Shift-selection, or Copy in the word path.
-        // Prepare the complete clipboard and event sequence before any deletion.
-        let heldModifiers = CGEventSource.flagsState(.combinedSessionState)
-        let unsafeModifiers: CGEventFlags = [.maskShift, .maskCommand, .maskControl, .maskAlternate]
-        guard heldModifiers.intersection(unsafeModifiers).isEmpty else {
-            completion(.ignored); return nil
-        }
-        guard clipboard.paste(conversion.text, deletingBeforeCaret: plan.selectionSteps) else {
-            return "Не удалось отправить замену текста"
-        }
-        func verify(_ remaining: Int) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
-                guard sameFocus() else { clipboard.restore(); completion(.unverified); return }
-                if attribute(element, kAXValueAttribute) as? String == expectedDocument {
-                    clipboard.restore()
-                    TISSelectInputSource(conversion.target)
-                    let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
-                    diagnosticDetails += "; подтверждено за \(elapsed) мс"
-                    completion(.converted)
-                } else if remaining > 0 {
-                    verify(remaining - 1)
-                } else {
-                    clipboard.restore()
-                    completion(.unverified)
+        ReplacementOverlay.prepare(element: element, range: targetRange, valid: sameFocus) { overlay in
+            // Capture is asynchronous: revalidate text, caret and physical modifiers before deleting.
+            guard sameFocus(), let current = selection(element), current.length == 0,
+                  current.location == selectedRange.location,
+                  attribute(element, kAXValueAttribute) as? String == originalDocument else {
+                diagnosticDetails += "; курсор или текст изменились после снимка"
+                overlay?.close(); clipboard.restore(); completion(.ignored); return
+            }
+            let held = CGEventSource.flagsState(.combinedSessionState)
+            let unsafe: CGEventFlags = [.maskShift, .maskCommand, .maskControl, .maskAlternate]
+            guard held.intersection(unsafe).isEmpty else {
+                diagnosticDetails += "; удерживается модификатор: \(held.rawValue)"
+                overlay?.close(); clipboard.restore(); completion(.ignored); return
+            }
+            overlay?.show()
+            guard clipboard.paste(conversion.text, deletingBeforeCaret: plan.selectionSteps) else {
+                overlay?.close(); clipboard.restore()
+                completion(.failure("Не удалось отправить замену текста")); return
+            }
+            func verify(_ remaining: Int) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                    guard sameFocus() else { overlay?.close(); clipboard.restore(); completion(.unverified); return }
+                    if attribute(element, kAXValueAttribute) as? String == expectedDocument {
+                        clipboard.restore()
+                        TISSelectInputSource(conversion.target)
+                        overlay?.reveal()
+                        let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+                        diagnosticDetails += "; подтверждено за \(elapsed) мс"
+                        completion(.converted)
+                    } else if remaining > 0 {
+                        verify(remaining - 1)
+                    } else {
+                        overlay?.close(); clipboard.restore(); completion(.unverified)
+                    }
                 }
             }
+            verify(24)
         }
-        verify(24)
         return nil
     }
 
@@ -260,40 +271,60 @@ enum TextEditor {
                     clipboard.restore()
                     completion(.failure("В выделении нет символов для преобразования")); return
                 }
-                guard stillValid(), clipboard.write(conversion.text), KeyboardEvents.command(9) else {
-                    clipboard.restore()
-                    completion(.failure("Вставка отменена: поле или буфер обмена изменились")); return
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    if stillValid() {
-                        TISSelectInputSource(conversion.target)
-                        // Canvas editors such as Figma do not expose an AX range.
-                        // Paste collapses the user's selection; restore it from
-                        // the caret so a second double Shift converts it back.
-                        let keys = Array(repeating: (CGKeyCode(123), CGEventFlags.maskShift), count: conversion.text.count)
-                        if let events = KeyboardEvents.sequence(keys) { KeyboardEvents.post(events) }
+                var animationElement = originalFocus
+                var animationRange: NSRange?
+                for _ in 0..<6 {
+                    guard let candidate = animationElement else { break }
+                    if let range = selection(candidate), range.length > 0 {
+                        animationRange = NSRange(location: range.location, length: range.length)
+                        break
                     }
-                    // Confirm the real editor selection, not its AX mirror.
-                    // If it is missing, the next Copy will fail safely instead
-                    // of reusing a stale AX range and inserting another word.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        guard stillValid(), clipboard.write("SSwitcher-verify-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
-                            clipboard.restore(); completion(.unverified); return
+                    guard let parent = attribute(candidate, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                    animationElement = (parent as! AXUIElement)
+                }
+                ReplacementOverlay.prepare(element: animationElement, range: animationRange, valid: stillValid) { overlay in
+                    // Copy itself posts Command; synthetic session flags cannot
+                    // distinguish that modifier from physical input here.
+                    guard stillValid() else {
+                        overlay?.close(); clipboard.restore(); completion(.ignored); return
+                    }
+                    overlay?.show()
+                    guard clipboard.write(conversion.text), KeyboardEvents.command(9) else {
+                        overlay?.close(); clipboard.restore()
+                        completion(.failure("Вставка отменена: поле или буфер обмена изменились")); return
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        if stillValid() {
+                            TISSelectInputSource(conversion.target)
+                            // Canvas editors such as Figma do not expose an AX range.
+                            // Paste collapses the user's selection; restore it from
+                            // the caret so a second double Shift converts it back.
+                            let keys = Array(repeating: (CGKeyCode(123), CGEventFlags.maskShift), count: conversion.text.count)
+                            if let events = KeyboardEvents.sequence(keys) { KeyboardEvents.post(events) }
                         }
-                        func verifyCopy(_ remaining: Int) {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                guard stillValid() else { clipboard.restore(); completion(.unverified); return }
-                                if !clipboard.hasCopyResult && remaining > 0 { verifyCopy(remaining - 1); return }
-                                let actual = clipboard.acceptCopyResult(expectedSelectedText: conversion.text)
-                                clipboard.restore()
-                                diagnosticDetails += actual == conversion.text ? "; выделение подтверждено Copy" : "; выделение не подтверждено"
-                                if actual == conversion.text, app.bundleIdentifier == "com.figma.Desktop" {
-                                    verifiedCanvasSelection = (app.processIdentifier, conversion.text, isInputUnchanged)
-                                }
-                                completion(actual == conversion.text ? .converted : .unverified)
+                        // Confirm the real editor selection, not its AX mirror.
+                        // If it is missing, the next Copy will fail safely instead
+                        // of reusing a stale AX range and inserting another word.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            guard stillValid(), clipboard.write("SSwitcher-verify-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
+                                overlay?.close(); clipboard.restore(); completion(.unverified); return
                             }
+                            func verifyCopy(_ remaining: Int) {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                    guard stillValid() else { overlay?.close(); clipboard.restore(); completion(.unverified); return }
+                                    if !clipboard.hasCopyResult && remaining > 0 { verifyCopy(remaining - 1); return }
+                                    let actual = clipboard.acceptCopyResult(expectedSelectedText: conversion.text)
+                                    clipboard.restore()
+                                    diagnosticDetails += actual == conversion.text ? "; выделение подтверждено Copy" : "; выделение не подтверждено"
+                                    if actual == conversion.text, app.bundleIdentifier == "com.figma.Desktop" {
+                                        verifiedCanvasSelection = (app.processIdentifier, conversion.text, isInputUnchanged)
+                                    }
+                                    if actual == conversion.text { overlay?.reveal() } else { overlay?.close() }
+                                    completion(actual == conversion.text ? .converted : .unverified)
+                                }
+                            }
+                            verifyCopy(9)
                         }
-                        verifyCopy(9)
                     }
                 }
             }
