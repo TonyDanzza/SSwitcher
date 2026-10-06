@@ -34,10 +34,13 @@ struct EditorCompatibilityPolicy {
         AccessibilityEditorPolicy.permitsEditing(isFigma: isFigma, role: snapshot.role, description: snapshot.description)
     }
     func replacementBackend(for application: EditorApplication, snapshot: AXEditorSnapshot, selected: Bool,
-                            selectedTextSettable: Bool) -> TextReplacementBackend {
+                            selectedTextSettable: Bool, verifiedSpotlightSearch: Bool = false,
+                            queryValueSettable: Bool = false, queryRangeSettable: Bool = false) -> TextReplacementBackend {
         .select(isSelected: selected, bundleID: application.bundleID,
                 isCurrentProcess: application.pid == ProcessInfo.processInfo.processIdentifier,
-                isElectron: application.isElectron, role: snapshot.role, selectedTextSettable: selectedTextSettable)
+                isElectron: application.isElectron, role: snapshot.role, selectedTextSettable: selectedTextSettable,
+                verifiedSpotlightSearch: verifiedSpotlightSearch, queryValueSettable: queryValueSettable,
+                queryRangeSettable: queryRangeSettable)
     }
     func textControlPolicy(for application: EditorApplication, snapshot: AXEditorSnapshot?) -> UnicodeTextInput.ControlPolicy {
         // Only public range-string/end-point proof enables Figma Return/ShiftReturn

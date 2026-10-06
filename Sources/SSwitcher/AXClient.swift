@@ -1,4 +1,5 @@
 import ApplicationServices
+import AppKit
 import Foundation
 import os
 import SwitcherCore
@@ -42,6 +43,11 @@ struct AXEditorSnapshot {
 
 }
 
+struct AXSpotlightFocus {
+    let field: AXUIElement
+    let window: AXUIElement
+}
+
 struct AXEditorContext {
     let application: EditorApplication
     let policy: EditorCompatibilityPolicy
@@ -50,6 +56,7 @@ struct AXEditorContext {
     let snapshot: AXEditorSnapshot?
     let valueEditable: Bool
     let selectionSettable: Bool
+    let spotlightFocus: AXSpotlightFocus?
     var usesCanvasSelection: Bool { policy.isCanvasTextEditor(snapshot) }
 }
 
@@ -116,17 +123,62 @@ final class AXClient {
         return configured(value as! AXUIElement)
     }
 
-    func target(fallbackPID: pid_t) -> (pid: pid_t, focused: AXUIElement?)? {
+    func target(fallbackPID: pid_t) -> (pid: pid_t, focused: AXUIElement?, spotlight: AXSpotlightFocus?)? {
         let system = configured(AXUIElementCreateSystemWide())
         if let focus = element(attribute(system, kAXFocusedUIElementAttribute)) {
             var pid: pid_t = 0
-            if AXUIElementGetPid(focus, &pid) == .success { return (pid, focus) }
+            if AXUIElementGetPid(focus, &pid) == .success { return (pid, focus, spotlightFocus(focus, pid: pid)) }
         }
         // Systemwide discovery is safe on the worker, but a fallback query to
         // our app's focused view would execute AppKit in-process on that worker.
-        if fallbackPID == ProcessInfo.processInfo.processIdentifier, execution.policy == .remoteApplication { return (fallbackPID, nil) }
+        if fallbackPID == ProcessInfo.processInfo.processIdentifier, execution.policy == .remoteApplication { return (fallbackPID, nil, nil) }
         let application = configured(AXUIElementCreateApplication(fallbackPID))
-        return (fallbackPID, element(attribute(application, kAXFocusedUIElementAttribute)))
+        return (fallbackPID, element(attribute(application, kAXFocusedUIElementAttribute)), nil)
+    }
+
+    /// Narrow public UI evidence, not an app-name exception. Other Campo/Siri
+    /// fields and every unavailable/malformed query fail this overlay proof.
+    private func spotlightFocus(_ field: AXUIElement, pid: pid_t, deadline: Double? = nil) -> AXSpotlightFocus? {
+        guard let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+              bundleID == "com.apple.campo" else { return nil }
+        let deadline = deadline ?? ProcessInfo.processInfo.systemUptime + ConversionTiming.overlayFocusBudget
+        func read(_ node: AXUIElement, _ name: String) -> CFTypeRef? {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            let value = attribute(configured(node), name)
+            return ProcessInfo.processInfo.systemUptime < deadline ? value : nil
+        }
+        let role = read(field, kAXRoleAttribute) as? String
+        let subrole = read(field, kAXSubroleAttribute) as? String
+        let identifier = read(field, kAXIdentifierAttribute) as? String
+        guard role == kAXTextFieldRole, subrole == kAXSearchFieldSubrole, identifier == "SpotlightSearchField" else { return nil }
+        var ancestor = element(read(field, kAXParentAttribute))
+        for _ in 0..<8 {
+            guard let current = ancestor else { return nil }
+            if SpotlightSearchScope.isVerified(bundleID: bundleID, role: role, subrole: subrole, identifier: identifier,
+                                               windowRole: read(current, kAXRoleAttribute) as? String,
+                                               windowSubrole: read(current, kAXSubroleAttribute) as? String) {
+                return AXSpotlightFocus(field: field, window: current)
+            }
+            ancestor = element(read(current, kAXParentAttribute))
+        }
+        return nil
+    }
+
+    private func systemSpotlightMatches(_ original: AXSpotlightFocus, pid: pid_t) -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + ConversionTiming.overlayFocusBudget
+        let system = configured(AXUIElementCreateSystemWide())
+        guard let focusedApp = element(attribute(system, kAXFocusedApplicationAttribute)),
+              ProcessInfo.processInfo.systemUptime < deadline else { return false }
+        var appPID: pid_t = 0
+        guard AXUIElementGetPid(focusedApp, &appPID) == .success, appPID == pid,
+              let focused = element(attribute(system, kAXFocusedUIElementAttribute)),
+              ProcessInfo.processInfo.systemUptime < deadline else { return false }
+        var focusedPID: pid_t = 0
+        guard AXUIElementGetPid(focused, &focusedPID) == .success,
+              let proof = spotlightFocus(focused, pid: focusedPID, deadline: deadline) else { return false }
+        return SpotlightSearchScope.matchesFocus(expectedPID: pid, actualPID: focusedPID,
+                                                 sameField: CFEqual(original.field, proof.field),
+                                                 sameWindow: CFEqual(original.window, proof.window), verifiedIdentity: true)
     }
 
     private func prepare(_ application: EditorApplication) {
@@ -138,29 +190,35 @@ final class AXClient {
         manualAccessibility.insert(success, for: application.session, at: now, lifetime: success ? 60 : 3)
     }
 
-    func context(application: EditorApplication, focus: AXUIElement?, cancellation: AttemptCancellation) -> AXEditorContext? {
+    func context(application: EditorApplication, focus: AXUIElement?, spotlight: AXSpotlightFocus? = nil,
+                 cancellation: AttemptCancellation) -> AXEditorContext? {
         prepare(application)
         let policy = EditorCompatibilityPolicy(application: application)
         // Enabling an Electron accessibility tree can replace the focused AX
         // object. Discover it again after prepare instead of using that mirror.
         let app = configured(AXUIElementCreateApplication(application.pid))
-        let focused = element(attribute(app, kAXFocusedUIElementAttribute)) ?? focus
+        if let spotlight, !systemSpotlightMatches(spotlight, pid: application.pid) { return nil }
+        let focused = spotlight?.field ?? element(attribute(app, kAXFocusedUIElementAttribute)) ?? focus
         var candidate = focused
         var snapshot: AXEditorSnapshot?
         for depth in 0..<6 {
             guard !cancellation.isCancelled, let current = candidate else { break }
             snapshot = read(current, application: application)
-            if snapshot?.isSecure == true || snapshot?.range != nil { break }
+            // Overlay authority belongs to this exact search field. Never
+            // substitute a parent/result-view document when its range is absent.
+            if spotlight != nil || snapshot?.isSecure == true || snapshot?.range != nil { break }
             guard depth < 5, let parent = snapshot?.parent else { break }
             candidate = parent
         }
         guard !cancellation.isCancelled else { return nil }
+        if spotlight != nil, !SpotlightSearchScope.acceptsDocument(snapshot?.value) { return nil }
         var valueEditable = false
         var selectionSettable = false
         if let candidate, snapshot?.range != nil, snapshot?.isSecure != true {
             let key = ElementKey(session: application.session, element: candidate)
             let now = ProcessInfo.processInfo.systemUptime
             var cached = capabilities.value(for: key, at: now) ?? Capabilities()
+            if spotlight != nil { cached.selectionSettable = nil }
             if cached.valueEditable == nil {
                 var value = DarwinBoolean(false)
                 cached.valueEditable = AXUIElementIsAttributeSettable(candidate, kAXValueAttribute as CFString, &value) == .success && value.boolValue
@@ -175,7 +233,8 @@ final class AXClient {
             capabilities.insert(cached, for: key, at: now, lifetime: fullySupported ? 30 : 3)
         }
         return AXEditorContext(application: application, policy: policy, focused: focused, element: candidate,
-                               snapshot: snapshot, valueEditable: valueEditable, selectionSettable: selectionSettable)
+                               snapshot: snapshot, valueEditable: valueEditable, selectionSettable: selectionSettable,
+                               spotlightFocus: spotlight)
     }
 
     func read(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool = true) -> AXEditorSnapshot? {
@@ -303,11 +362,13 @@ final class AXClient {
         let result = readResult(editor, application: context.application, includeContext: true)
         guard case .snapshot(let snapshot) = result else { return result }
         guard !snapshot.isSecure, context.policy.permitsEditing(snapshot),
-              context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return .invalid }
+              context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection,
+              context.spotlightFocus == nil || SpotlightSearchScope.acceptsDocument(snapshot.value) else { return .invalid }
         return result
     }
 
     func focusMatches(_ context: AXEditorContext) -> Bool {
+        if let spotlight = context.spotlightFocus { return systemSpotlightMatches(spotlight, pid: context.application.pid) }
         guard let current = target(fallbackPID: context.application.pid), current.pid == context.application.pid else { return false }
         if let original = context.focused { return current.focused.map { CFEqual($0, original) } ?? false }
         return false
@@ -316,7 +377,8 @@ final class AXClient {
     func validate(_ context: AXEditorContext, document: String? = nil, range: NSRange? = nil, includeContext: Bool = false) -> AXEditorSnapshot? {
         guard focusMatches(context) else { return nil }
         guard let editor = context.element else { return document == nil && range == nil ? context.snapshot : nil }
-        guard let snapshot = read(editor, application: context.application, includeContext: includeContext), !snapshot.isSecure else { return nil }
+        guard let snapshot = read(editor, application: context.application, includeContext: includeContext), !snapshot.isSecure,
+              context.spotlightFocus == nil || SpotlightSearchScope.acceptsDocument(snapshot.value) else { return nil }
         if let document, snapshot.value.map({ AccessibilitySelectionPlan.exactlyEqual($0, document) }) != true { return nil }
         if let range, snapshot.range != range { return nil }
         return snapshot
@@ -330,28 +392,56 @@ final class AXClient {
     }
 
     func replacementBackend(_ context: AXEditorContext, snapshot: AXEditorSnapshot, selected: Bool) -> TextReplacementBackend {
+        if !selected, context.spotlightFocus != nil {
+            return context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: false,
+                selectedTextSettable: false, verifiedSpotlightSearch: true,
+                queryValueSettable: isEditable(context, snapshot: snapshot), queryRangeSettable: hasNativeRangeSetter(context))
+        }
         guard context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: selected,
-                                                selectedTextSettable: true) == .accessibilitySelectedText,
+                                                selectedTextSettable: true, verifiedSpotlightSearch: context.spotlightFocus != nil) == .accessibilitySelectedText,
               let editor = context.element else { return .unicodeEvents }
         var settable = DarwinBoolean(false)
         let supported = AXUIElementIsAttributeSettable(editor, kAXSelectedTextAttribute as CFString, &settable) == .success && settable.boolValue
         return context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: selected,
-                                                 selectedTextSettable: supported)
+                                                 selectedTextSettable: supported, verifiedSpotlightSearch: context.spotlightFocus != nil)
     }
 
-    /// One selected-fragment setter only. Never write AXValue/full-document
-    /// text, and never interpret its success reply as editor acknowledgement.
+    func hasNativeRangeSetter(_ context: AXEditorContext) -> Bool {
+        guard context.selectionSettable, let editor = context.element else { return false }
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(editor, kAXSelectedTextRangeAttribute as CFString, &settable) == .success && settable.boolValue
+    }
+
+    /// One selected-fragment setter only. Its success reply is not editor
+    /// acknowledgement; ordinary rich editors never get full AXValue writes.
     func replaceSelectedText(_ context: AXEditorContext, selection: AccessibilitySelectionPlan, replacement: String,
                              cancellation: AttemptCancellation) -> Bool? {
-        guard !cancellation.isCancelled, TextReplacementBackend.acceptsNativeText(replacement),
+        guard !cancellation.isCancelled, TextReplacementBackend.acceptsNativeText(replacement, permitsLineBreaks: context.spotlightFocus == nil),
               let editor = context.element,
               let snapshot = validate(context, document: selection.document, range: selection.range, includeContext: true),
               isEditable(context, snapshot: snapshot),
               selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
                                 selectedRanges: snapshot.selectedRanges),
               replacementBackend(context, snapshot: snapshot, selected: true) == .accessibilitySelectedText,
+              context.spotlightFocus == nil || focusMatches(context),
               !cancellation.isCancelled else { return false }
         let result = AXUIElementSetAttributeValue(editor, kAXSelectedTextAttribute as CFString, replacement as CFString)
+        return !cancellation.isCancelled && result == .success
+    }
+
+    /// Spotlight may drop fast Backspaces while recomputing search results.
+    /// Only the proven plain search field permits one exact query-value write.
+    func replaceSpotlightWord(_ context: AXEditorContext, document: String, caret: NSRange,
+                              replacement: AccessibilityReplacementPlan, cancellation: AttemptCancellation) -> Bool? {
+        guard context.spotlightFocus != nil, !cancellation.isCancelled, let editor = context.element,
+              SpotlightSearchScope.wordReplacement(document: document, caret: caret, replacement: replacement.text) == replacement,
+              let snapshot = validate(context, document: document, range: caret, includeContext: true),
+              AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range,
+                  selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges,
+                  expectedDocument: document, expectedCaret: caret),
+              replacementBackend(context, snapshot: snapshot, selected: false) == .accessibilitySpotlightQuery,
+              focusMatches(context), !cancellation.isCancelled else { return false }
+        let result = AXUIElementSetAttributeValue(editor, kAXValueAttribute as CFString, replacement.document as CFString)
         return !cancellation.isCancelled && result == .success
     }
 
@@ -366,7 +456,9 @@ final class AXClient {
                                                        selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: caret),
               !cancellation.isCancelled else { return false }
         var value = CFRange(location: range.location, length: range.length)
-        guard let parameter = AXValueCreate(.cfRange, &value), !cancellation.isCancelled,
+        guard let parameter = AXValueCreate(.cfRange, &value),
+              context.spotlightFocus == nil || hasNativeRangeSetter(context),
+              context.spotlightFocus == nil || focusMatches(context), !cancellation.isCancelled,
               AXUIElementSetAttributeValue(editor, kAXSelectedTextRangeAttribute as CFString, parameter) == .success else { return false }
         guard !cancellation.isCancelled else { return false }
         // A target may apply the range after replying. The coordinator polls
@@ -375,6 +467,7 @@ final class AXClient {
     }
 
     func bounds(_ context: AXEditorContext, range: NSRange) -> CGRect? {
+        guard context.spotlightFocus == nil || focusMatches(context) else { return nil }
         guard let editor = context.element, range.length > 0 else { return nil }
         let key = ElementKey(session: context.application.session, element: editor)
         let now = ProcessInfo.processInfo.systemUptime

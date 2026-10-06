@@ -4,6 +4,7 @@ enum ConversionTiming {
     static let shiftQuiet = 0.09
     static let axMessageTimeout: Float = 0.12
     static let canonicalDocumentBudget = 0.12
+    static let overlayFocusBudget = 0.12
     static let replacementDeadline = 0.5
     static let pollInterval = 0.02
     static let textPairInterval = 0.008

@@ -2,6 +2,35 @@ import XCTest
 @testable import SwitcherCore
 
 final class TextReplacementBackendTests: XCTestCase {
+    func testQueryValueBackendIsExclusiveToVerifiedSpotlightWordWithBothCapabilities() {
+        func backend(selected: Bool = false, bundle: String = "com.apple.campo", role: String = "AXTextField",
+                     verified: Bool = true, value: Bool = true, range: Bool = true, electron: Bool = false) -> TextReplacementBackend {
+            .select(isSelected: selected, bundleID: bundle, isCurrentProcess: false, isElectron: electron,
+                    role: role, selectedTextSettable: false, verifiedSpotlightSearch: verified,
+                    queryValueSettable: value, queryRangeSettable: range)
+        }
+        XCTAssertEqual(backend(), .accessibilitySpotlightQuery)
+        XCTAssertEqual(backend(selected: true), .unicodeEvents)
+        XCTAssertEqual(backend(bundle: "com.apple.TextEdit"), .unicodeEvents)
+        XCTAssertEqual(backend(role: "AXTextArea"), .unicodeEvents)
+        XCTAssertEqual(backend(verified: false), .unicodeEvents)
+        XCTAssertEqual(backend(value: false), .unicodeEvents)
+        XCTAssertEqual(backend(range: false), .unicodeEvents)
+        XCTAssertEqual(backend(electron: true), .unicodeEvents)
+    }
+    func testSpotlightSetterRequiresFreshCapabilityAndVerifiedSearchScope() {
+        func backend(selected: Bool = true, bundle: String = "com.apple.campo", role: String = "AXTextField",
+                     settable: Bool = true, verified: Bool = true) -> TextReplacementBackend {
+            .select(isSelected: selected, bundleID: bundle, isCurrentProcess: false, isElectron: false,
+                    role: role, selectedTextSettable: settable, verifiedSpotlightSearch: verified)
+        }
+        XCTAssertEqual(backend(), .accessibilitySelectedText)
+        XCTAssertEqual(backend(selected: false), .unicodeEvents)
+        XCTAssertEqual(backend(verified: false), .unicodeEvents)
+        XCTAssertEqual(backend(settable: false), .unicodeEvents)
+        XCTAssertEqual(backend(role: "AXTextArea"), .unicodeEvents)
+        XCTAssertEqual(backend(bundle: "other.app"), .unicodeEvents)
+    }
     func testSelectedTextBackendRequiresProvenNativeEditorAndSettableAttribute() {
         func backend(_ bundle: String, own: Bool = false, electron: Bool = false, role: String = "AXTextArea", selected: Bool = true, settable: Bool = true) -> TextReplacementBackend {
             .select(isSelected: selected, bundleID: bundle, isCurrentProcess: own, isElectron: electron, role: role, selectedTextSettable: settable)

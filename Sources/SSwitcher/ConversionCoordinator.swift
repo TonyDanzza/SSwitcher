@@ -84,7 +84,14 @@ final class ConversionCoordinator {
             }
             let application = EditorApplication(app)
             attempt.targetPID = application.pid
-            self.read(attempt, operation: { $0.context(application: application, focus: target.focused, cancellation: attempt.cancellation) }) { context in
+            attempt.spotlightFocus = target.spotlight
+            guard SpotlightSearchScope.permitsTarget(foregroundPID: attempt.frontmostPID, targetPID: application.pid,
+                                                      verifiedOverlay: target.spotlight != nil) else {
+                self.finish(attempt, outcome: .cancelled); return
+            }
+            self.read(attempt, operation: {
+                $0.context(application: application, focus: target.focused, spotlight: target.spotlight, cancellation: attempt.cancellation)
+            }) { context in
                 guard let context else { self.finish(attempt, outcome: .cancelled); return }
                 attempt.context = context
                 self.begin(attempt, context: context)
@@ -95,7 +102,8 @@ final class ConversionCoordinator {
     private func valid(_ attempt: ConversionAttempt, mutation: Bool = false) -> Bool {
         guard self.attempt === attempt, attempt.lifecycle.canContinue, !attempt.cancellation.isCancelled,
               attempt.unchanged(), !IsSecureEventInputEnabled(),
-              attempt.targetPID.map({ $0 == attempt.frontmostPID }) != false,
+              attempt.targetPID.map({ SpotlightSearchScope.permitsTarget(foregroundPID: attempt.frontmostPID, targetPID: $0,
+                                                                         verifiedOverlay: attempt.spotlightFocus != nil) }) != false,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == attempt.frontmostPID else { return false }
         return !mutation || attempt.modifiersClear()
     }
@@ -213,6 +221,8 @@ final class ConversionCoordinator {
                   let snapshot = client.validate(context, document: document, range: range, includeContext: true),
                   client.isEditable(context, snapshot: snapshot),
                   context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return nil }
+            if attempt.selected, context.spotlightFocus != nil,
+               !SpotlightSearchScope.canRestoreSelection(verifiedOverlay: true, nativeRangeSettable: client.hasNativeRangeSetter(context)) { return nil }
             let matches: Bool
             if let selection = attempt.selectionPlan {
                 matches = selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
@@ -227,8 +237,25 @@ final class ConversionCoordinator {
             guard let backend, self.valid(attempt, mutation: true), let conversion = attempt.converted else {
                 self.finish(attempt, outcome: .cancelled); return
             }
-            if backend == .accessibilitySelectedText {
-                guard let selection = attempt.selectionPlan, TextReplacementBackend.acceptsNativeText(conversion.text) else {
+            if context.spotlightFocus != nil, backend == .unicodeEvents {
+                self.finish(attempt, outcome: .failure("Spotlight не подтвердил возможность нативной замены")); return
+            }
+            if backend == .accessibilitySpotlightQuery {
+                guard let document = attempt.originalDocument, let caret = attempt.originalRange,
+                      let replacement = attempt.replacement, !attempt.selected,
+                      SpotlightSearchScope.wordReplacement(document: document, caret: caret, replacement: conversion.text) == replacement else {
+                    self.finish(attempt, outcome: .cancelled); return
+                }
+                guard self.reserveMutation(attempt) else { self.finish(attempt, outcome: .cancelled); return }
+                attempt.usesNativeSearchValue = true
+                self.diagnosticDetails += "; нативная замена поисковой строки"
+                self.read(attempt, operation: {
+                    $0.replaceSpotlightWord(context, document: document, caret: caret, replacement: replacement,
+                                           cancellation: attempt.cancellation)
+                }) { issued in self.mutationDelivered(attempt, delivered: issued == true) }
+            } else if backend == .accessibilitySelectedText {
+                guard let selection = attempt.selectionPlan,
+                      TextReplacementBackend.acceptsNativeText(conversion.text, permitsLineBreaks: context.spotlightFocus == nil) else {
                     self.finish(attempt, outcome: .failure("Этот текст нельзя безопасно преобразовать в редакторе")); return
                 }
                 guard self.reserveMutation(attempt) else { self.finish(attempt, outcome: .cancelled); return }
@@ -253,7 +280,8 @@ final class ConversionCoordinator {
 
     private func postUnicodeReplacement(_ attempt: ConversionAttempt, context: AXEditorContext, text: String) {
         // Construct every payload before reserving the one mutation. Neither
-        // transport reads a shared clipboard or replaces the complete AXValue.
+        // keyboard transport nor ordinary native editors use full AXValue.
+        guard context.spotlightFocus == nil else { finish(attempt, outcome: .cancelled); return }
         let policy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
         guard let input = UnicodeTextInput(text: text, controlPolicy: policy) else {
             finish(attempt, outcome: .failure("В этом приложении нельзя безопасно преобразовать такой текст")); return
@@ -314,6 +342,30 @@ final class ConversionCoordinator {
             if acknowledged {
                 if selection || !attempt.selected { self.confirmed(attempt) }
                 else { self.restoreSelection(attempt) }
+            } else if !selection, attempt.usesNativeSearchValue, !attempt.queryCaretRestored,
+                      replacement.documentMatches(snapshot.value) {
+                guard let caret = snapshot.range,
+                      AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: caret,
+                          selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges,
+                          expectedDocument: replacement.document, expectedCaret: caret) else {
+                    self.finish(attempt, outcome: .unverified); return
+                }
+                attempt.queryCaretRestored = true
+                self.awaitSelectionModifiers(attempt) {
+                    guard self.valid(attempt, mutation: true),
+                          !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else {
+                        self.finish(attempt, outcome: .unverified); return
+                    }
+                    self.read(attempt, operation: {
+                        $0.restoreSelection(context, document: replacement.document, caret: caret,
+                            range: replacement.caret, cancellation: attempt.cancellation)
+                    }) { restored in
+                        guard restored == true else { self.finish(attempt, outcome: .unverified); return }
+                        // Keep the original deadline: one caret correction
+                        // cannot renew or retry document/caret verification.
+                        self.awaitAcknowledgement(attempt, selection: false)
+                    }
+                }
             } else {
                 self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt, selection: selection) }
             }
@@ -340,6 +392,7 @@ final class ConversionCoordinator {
                 self.awaitAcknowledgement(attempt, selection: true)
             }
         } else {
+            guard context.spotlightFocus == nil else { self.finish(attempt, outcome: .unverified); return }
             // A physical Shift wait may outlive our first caret proof. Read it
             // again before sending one keyboard restoration, never a retry.
             read(attempt, operation: { client -> Bool? in
@@ -416,6 +469,7 @@ private final class ConversionAttempt {
     let completion: (ConversionCoordinator.Outcome) -> Void
     var context: AXEditorContext?
     var targetPID: pid_t?
+    var spotlightFocus: AXSpotlightFocus?
     var converted: InputSources.Conversion?
     var originalDocument: String?
     var originalRange: NSRange?
@@ -423,6 +477,8 @@ private final class ConversionAttempt {
     var replacement: AccessibilityReplacementPlan?
     var deletingCharacters = 0
     var selected = false
+    var usesNativeSearchValue = false
+    var queryCaretRestored = false
     var canvasSelectionPlan = CanvasSelectionPlan.characters(0)
     var image: ImageOverlay?
     var readiness: ReadinessDeadline?
