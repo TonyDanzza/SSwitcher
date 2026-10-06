@@ -20,10 +20,30 @@ This separates deterministic automated checks, independent live app tests and ca
 | Launch at login, approval/error, copy diagnostics | Release compilation; no automatic registration path | Installed0.1.7 diagnostics layout and Copy button verified: report has version/status/timings and no fixture text. Login status was notFound before registration, so menu remains off and reports the missing service. Registration/unregistration and subsequent login are not live-tested; no login setting was changed. |
 | TCC identity/macOS baseline/icons | Existing Info.plist/build signing/icon assets preserved; macOS 13 target retained, screenshot availability guarded | Version0.1.7/build9 installed in /Applications with the same Apple Development identity/team; codesign strict verification and built/installed SHA-256 equality passed. Existing AX/Input Monitoring/Post Events permissions remained granted. macOS13 runtime is unavailable for live testing here. |
 
-## Commands
+## Version 0.1.7 commands
 
 - `swift test`: **68 tests passed**, including all previous 37 tests; compiler-cache sandbox escalation was needed.
 - `swift build -c release`: passed after modifier, local-AX, Figma preflight and queued-arrow continuation corrections. Final signed release rebuilt and installed; strict signature verification passed.
+
+## Figma selected-text regression — 2026-10-06
+
+The primary reproduced a stop on the installed 0.1.7 baseline: after double Shift, a second physical Shift held for 600 ms during the pending replacement caused an unverified completion. Only Copy and Paste had been posted; the replacement was present, but its selection had not been restored. Another double Shift increased the detector counter while posting zero additional commands. The running attempt's physical-modifier check, followed by the blocked burst gate, explains this failure independently of a clipboard timeout.
+
+The corrected path waits up to one second for Shift release at selection boundaries while continuing to check input/focus and secure input. It never queues a second mutation. Whole-document selection requires a coherent entire AX range plus independent matching initial Copy before using a single Command+A. Partial selection retains exact arrows, paced by receipt of each batch's final key-up at the listening session tap. A separate source must carry the final pair's marker: live Quartz tests normalized per-event-only markers back to the original source. Receipt establishes system-queue delivery; exact actual Copy remains the editor proof.
+
+Automated candidate validation: **87 tests passed**, including the previous 68. New regressions cover whole/partial selection scope, inserted grapheme counts, bounded verification Copies, unrelated/newer clipboard ownership, deferred Copy publication, late batch receipts, source metadata regeneration and a repeated Shift release without another mutation. macOS pasteboard IPC and CoreGraphics source creation require running these tests outside the workspace sandbox. The sandboxed compile passed; its test run could not acquire a unique pasteboard. The subsequent complete run passed with zero failures.
+
+Independent live candidate observations using the temporary signed test fixture:
+
+- Whole 168-character Figma selection converted and reversed in 376/352 ms with four synthetic commands per attempt, compared with 171 commands in the same baseline fixture.
+- The reproduced 600 ms Shift hold completed with a confirmed selection in 876 ms; the following reversal took 318 ms and required no reselection.
+- A 70-character partial selection passed six alternating conversions in 462/418/427/427/442/442 ms, with 73 commands per attempt. The complete document returned exactly to its original text, including the untouched prefix.
+- The same Shift hold during a partial replacement completed in 972 ms, followed by a confirmed reversal in 459 ms.
+- Direct `AXSelectedText` replacement was tested separately: Figma reported settable and returned setter success, while independent actual Copy and the visible canvas retained the original text. This false success rules out that AX setter for production canvas replacement.
+
+One later immediate whole-document reversal returned unverified in 305 ms even though the independent full-document read exactly matched the original 168 characters. Eight further instrumented reversals passed and returned stable matching clipboard text, so the precise cause of that isolated confirmation failure remains unproven. Code inspection found that verification treated missing plain text or a revision changing during its read as a definitive mismatch. The minimal correction now waits for a stable published value within the existing deadline without adopting the intermediate revision or issuing another Copy. The two new pasteboard tests verify clear-then-publish success and preservation of a newer unrelated copy; they do not establish that publication timing caused the isolated live failure. Initial Copy retains its existing pre-mutation failure behavior.
+
+These observations verify the reproduced regression and the tested fixtures, not every Figma text state. Partial canvas selections may still expand visibly, and Unicode/bidirectional cursor semantics require live editor checks. A genuine unverified result, input/focus change or held Shift beyond the release budget remains guarded. No deletion, Paste or selection-restoration sequence is retried. Final release/native validation and installation are performed independently by the primary after freezing production sources; test hooks remain confined to `/tmp`.
 
 ## Controlled native observations
 
@@ -31,7 +51,7 @@ The primary used the same native diagnostic NSTextView, actual double-Shift even
 
 The callback includes small post-acknowledgement cleanup; the trace ends at editor acknowledgement and excludes reveal. The target app's visible rendered frame has not been measured.
 
-## Final independent review — 2026-10-06
+## Version 0.1.7 independent review — 2026-10-06
 
 The primary independently reran all68 tests: zero failures. The final core repeated the same10 native word conversions with animation: callback times were160,174,155,175,149,151,174,177,176,151ms (median167ms, range149–177ms). Baseline median was229ms: about27% less time in this controlled fixture. All10 confirmed and the final word matched the original. This supersedes the preliminary159.5ms optimized median; neither run is a broad compatibility/performance guarantee.
 
@@ -42,3 +62,12 @@ Tests used temporary signed builds under `/tmp/sswitcher-review`; injected comma
 Installed executable SHA-256: `52a593d7fb45e0983040308eaea58498aeb2479cbd052351dabdb22dc8357860`. Final changes after the68-test run only initialize the diagnostic editor caret and correct the wording for a missing login service; release build/strict signing verification and `git diff --check` pass. The clean installed build's diagnostic conversion button and report-copy action were exercised; no gesture injection remains in the app.
 
 Unverified/live-limited cases: other macOS versions and untested applications (including this iteration's ChatGPT/Safari/Spotlight matrix), display/permission revocation and regrant timing, complete all-format clipboard provider races, Reduce Motion/offscreen geometry edge cases, and actual login registration/reboot. Existing permissions were preserved, not reset for testing.
+
+
+## Version 0.1.8 final independent review — 2026-10-06
+
+The primary independently ran the final87-test suite: zero failures. After the deferred-Copy publication change, the final live run confirmed16 consecutive Figma conversions: eight whole168-character conversions (321/346/324/332/508/357/321/307ms), six partial70-character conversions (406/400/394/387/384/428ms), then the600ms physical-Shift overlap on that partial selection (956ms) and immediate reverse without reselection (390ms). Every attempt confirmed exact actual Copy. The complete original168-character document was restored, including its untouched prefix and nonbreaking spaces; the test selection was collapsed afterward.
+
+Before the final Copy-publication adjustment, the primary also verified a40-tap Shift storm: one whole-text conversion and one explicit subsequent reversal, four commands each, with no queued duplicate mutation. Native NSTextView word conversion and retained selected-text conversion passed on the integrated source (199/244ms). These are fixture observations, not all-app compatibility or rendered-frame measurements. One intermediate candidate's305ms false-unverified result remains unexplained; the final publication handling addresses a valid transient-read condition but is not proof that every Figma issue is eliminated.
+
+Clean version0.1.8/build10 was rebuilt and installed in `/Applications/SSwitcher.app` with the existing Apple Development identity. Strict signature verification passed; built and installed executables have identical SHA-256 `9ce6de5ee578bbc5b60e26239f4f21982105485a8e03f6537a1a09b87a2d1569`. No test gesture hooks or publication/event trace code remain in production sources. Existing permissions were preserved. The previous0.1.7 app remains backed up in `/tmp/sswitcher-review/SSwitcher-0.1.7.app`.

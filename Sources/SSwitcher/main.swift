@@ -27,6 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.onRealInput = { [weak self] in self?.editor.userInputChanged() }
         monitor.onGestureRelease = { [weak self] time in self?.editor.performance.gestureReleased(at: time) }
         monitor.onGestureCancelled = { [weak self] in self?.editor.performance.cancelGesture() }
+        monitor.onBlockedGesture = { [weak self] in
+            guard let self else { return }
+            self.lastResult = "Проверьте текст и выделите его заново: предыдущая замена не подтверждена"
+            self.statusItem.button?.toolTip = self.lastResult
+        }
         monitor.canStartConversion = { [weak self] in self?.editor.isConverting == false }
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled, !self.editor.isConverting, self.monitor.claimConversion() else { return }
@@ -46,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .ignored: self.lastResult = "Курсор должен стоять в конце слова"
                 case .cancelled: self.lastResult = "Замена отменена: ввод или активное поле изменились"
                 case .converted: self.lastResult = "Текст заменён — подтверждено редактором"
-                case .unverified: self.lastResult = "Вставка отправлена; редактор не подтвердил результат"
+                case .unverified: self.lastResult = "Вставка отправлена; проверьте текст и выделите его заново"
                 case .failure(let message):
                     self.lastResult = message
                     NSSound.beep()

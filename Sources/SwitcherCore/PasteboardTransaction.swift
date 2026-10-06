@@ -36,6 +36,32 @@ public final class PasteboardTransaction {
         return pasteboard.changeCount != writtenChangeCount
     }
 
+    public var retainsOwnership: Bool {
+        !finished && pasteboard.changeCount == (writtenChangeCount ?? initialChangeCount)
+    }
+
+    public enum VerificationResult: Equatable {
+        case waiting
+        case copied(String)
+        case rejected
+    }
+
+    /// A mismatching, unrelated clipboard revision is never adopted. A bounded
+    /// verification retry may adopt only the expected text or a known transient
+    /// result, and must check ownership again immediately before its next Copy.
+    public func acceptVerificationCopy(_ verification: CanvasSelectionVerification) -> VerificationResult {
+        guard !finished, hasCopyResult else { return .waiting }
+        let revision = pasteboard.changeCount
+        let text = pasteboard.string(forType: .string)
+        // Copy may first clear/declare its formats, then publish plain text.
+        // A revision changing during the read is likewise an unfinished
+        // snapshot, not a mismatching selection. Neither is owned yet.
+        guard pasteboard.changeCount == revision, let text else { return .waiting }
+        guard text == verification.expected || verification.isTransient(text) else { return .rejected }
+        writtenChangeCount = revision
+        return .copied(text)
+    }
+
     /// Call only after our Copy command, with unchanged app focus and no user
     /// input. The copied value becomes ours to restore after conversion.
     public func acceptCopyResult(expectedSelectedText: String? = nil, requireMatch: Bool = false) -> String? {

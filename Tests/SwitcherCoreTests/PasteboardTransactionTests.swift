@@ -128,4 +128,80 @@ final class PasteboardTransactionTests: XCTestCase {
         XCTAssertFalse(transaction.write("late callback"))
         XCTAssertEqual(pasteboard.string(forType: .string), "original")
     }
+
+    func testCanvasTransientCopyCanBeVerifiedAgainAndOriginalClipboardRestored() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        let verification = CanvasSelectionVerification(expected: "привет мир", previouslyCopied: "ghbdtn vbh", start: 0, timeout: 0.5)
+        XCTAssertTrue(transaction.write("Copy probe"))
+        pasteboard.clearContents(); pasteboard.setString("мир", forType: .string)
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .copied("мир"))
+        XCTAssertTrue(transaction.retainsOwnership)
+        XCTAssertTrue(transaction.write("second Copy probe"))
+        pasteboard.clearContents(); pasteboard.setString("привет мир", forType: .string)
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .copied("привет мир"))
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testCanvasUnrelatedCopyIsNotAdoptedOrOverwritten() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        let verification = CanvasSelectionVerification(expected: "привет", previouslyCopied: "ghbdtn", start: 0, timeout: 0.5)
+        XCTAssertTrue(transaction.write("Copy probe"))
+        pasteboard.clearContents(); pasteboard.setString("new user copy", forType: .string)
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .rejected)
+        XCTAssertFalse(transaction.retainsOwnership)
+        XCTAssertFalse(transaction.write("retry probe"))
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "new user copy")
+    }
+
+    func testNewCopyBetweenTransientResponseAndRetryIsPreserved() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        let verification = CanvasSelectionVerification(expected: "привет", previouslyCopied: "ghbdtn", start: 0, timeout: 0.5)
+        XCTAssertTrue(transaction.write("Copy probe"))
+        pasteboard.clearContents(); pasteboard.setString("вет", forType: .string)
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .copied("вет"))
+        pasteboard.clearContents(); pasteboard.setString("new user copy", forType: .string)
+        XCTAssertFalse(transaction.retainsOwnership)
+        XCTAssertFalse(transaction.write("retry probe"))
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "new user copy")
+    }
+
+    func testVerificationWaitsForPlainTextPublishedAfterClipboardClear() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        let verification = CanvasSelectionVerification(expected: "привет", previouslyCopied: "ghbdtn", start: 0, timeout: 0.5)
+        XCTAssertTrue(transaction.write("Copy probe"))
+        pasteboard.clearContents()
+        let pendingRevision = pasteboard.changeCount
+        for _ in 0..<5 {
+            XCTAssertEqual(transaction.acceptVerificationCopy(verification), .waiting)
+            XCTAssertFalse(transaction.retainsOwnership)
+            XCTAssertEqual(pasteboard.changeCount, pendingRevision)
+        }
+        XCTAssertFalse(transaction.write("premature retry probe"))
+        pasteboard.setString("привет", forType: .string)
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .copied("привет"))
+        XCTAssertTrue(transaction.retainsOwnership)
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testUnrelatedTextPublishedAfterClearIsStillPreserved() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        let verification = CanvasSelectionVerification(expected: "привет", previouslyCopied: "ghbdtn", start: 0, timeout: 0.5)
+        XCTAssertTrue(transaction.write("Copy probe"))
+        pasteboard.clearContents()
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .waiting)
+        pasteboard.setString("new user copy", forType: .string)
+        XCTAssertEqual(transaction.acceptVerificationCopy(verification), .rejected)
+        XCTAssertFalse(transaction.retainsOwnership)
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "new user copy")
+    }
 }

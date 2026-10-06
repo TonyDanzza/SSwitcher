@@ -7,6 +7,7 @@ final class KeyboardMonitor {
     var onRealInput: (() -> Void)?
     var onGestureRelease: ((Double) -> Void)?
     var onGestureCancelled: (() -> Void)?
+    var onBlockedGesture: (() -> Void)?
     var canStartConversion: (() -> Bool)?
     private var burst = ShiftBurstGate(quietInterval: ConversionTiming.shiftQuiet)
     private var pendingDispatch: DispatchWorkItem?
@@ -61,7 +62,7 @@ final class KeyboardMonitor {
     func start() -> Bool {
         if isRunning { return true }
         guard CGPreflightListenEventAccess() else { return false }
-        let types: [CGEventType] = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        let types: [CGEventType] = [.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
@@ -94,6 +95,7 @@ final class KeyboardMonitor {
         burst.realInput()
         onGestureCancelled?()
         onRealInput?()
+        KeyboardEvents.cancelDelivery()
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         tap = nil
@@ -112,10 +114,15 @@ final class KeyboardMonitor {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
-        if event.getIntegerValueField(.eventSourceUserData) == KeyboardEvents.marker {
-            syntheticEventCount += 1
+        if KeyboardEvents.received(event) {
+            // Keep the diagnostic counter comparable to earlier releases:
+            // one count per synthetic command, excluding its release receipt.
+            if type != .keyUp { syntheticEventCount += 1 }
             return
         }
+        // Real key-down already invalidates the attempt. Listening for key-up
+        // is needed only for our delivery receipt, not a second input change.
+        if type == .keyUp { return }
         activityGeneration &+= 1
         // The listening tap does only local bookkeeping/invalidation. AppKit
         // work is dispatched after the callback has returned to its run loop.
@@ -145,6 +152,9 @@ final class KeyboardMonitor {
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             doubleShiftCount += 1
+            if burst.state == .blocked {
+                DispatchQueue.main.async { [weak self] in self?.onBlockedGesture?() }
+            }
             if canStartConversion?() != false { burst.request() }
         }
         guard burst.pending, !shiftDown else { return }
