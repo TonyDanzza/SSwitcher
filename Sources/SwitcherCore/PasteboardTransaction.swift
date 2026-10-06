@@ -70,7 +70,6 @@ public final class PasteboardTransaction {
         let plainText = pasteboard.string(forType: .string)
         let html = pasteboard.string(forType: .html)
         guard pasteboard.changeCount == revision else { return nil }
-        writtenChangeCount = revision
         if requireMatch { guard let expectedSelectedText, plainText == expectedSelectedText else { return nil } }
         // Figma includes scene metadata even when copying styled characters.
         // Accept it only when a text editor selection independently matches;
@@ -80,6 +79,7 @@ public final class PasteboardTransaction {
             guard let expectedSelectedText, !expectedSelectedText.isEmpty,
                   plainText == expectedSelectedText else { return nil }
         }
+        writtenChangeCount = revision
         return plainText
     }
 

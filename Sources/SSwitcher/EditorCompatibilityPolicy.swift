@@ -1,4 +1,5 @@
 import AppKit
+import SwitcherCore
 
 struct EditorApplication {
     let pid: pid_t
@@ -28,4 +29,8 @@ struct EditorCompatibilityPolicy {
     var allowsTransientFocus: Bool { usesCanvasSelection }
     var requiresMatchingInitialCopy: Bool { usesCanvasSelection }
     var canSetSelectionThroughAX: Bool { !usesCanvasSelection }
+    func textControlPolicy(for application: EditorApplication, snapshot: AXEditorSnapshot?) -> UnicodeTextInput.ControlPolicy {
+        .forEditor(isCurrentProcess: application.pid == ProcessInfo.processInfo.processIdentifier,
+                   isFigma: usesCanvasSelection, role: snapshot?.role, description: snapshot?.description)
+    }
 }

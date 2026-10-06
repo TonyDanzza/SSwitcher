@@ -17,6 +17,7 @@ enum KeyboardEvents {
 
     static func sequence(_ keys: [(CGKeyCode, CGEventFlags)]) -> [CGEvent]? {
         guard CGPreflightPostEventAccess(), let source = CGEventSource(stateID: .privateState) else { return nil }
+        source.userData = marker
         var events: [CGEvent] = []
         for (key, flags) in keys {
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
@@ -77,6 +78,43 @@ enum KeyboardEvents {
         let completion = deliveryCompletion
         deliveryCompletion = nil
         DispatchQueue.main.async { completion?(delivered) }
+    }
+
+    /// Text payloads are immutable before the first batch. Receipt paces the
+    /// stream; it is never editor proof. A repeated Shift may release within
+    /// the existing budget, while all other real input/focus cancels at once.
+    static func postTextReplacement(_ batches: [[CGEvent]], valid: @escaping () -> Bool,
+                                    modifiersClear: @escaping () -> Bool, completion: @escaping (Bool) -> Void) {
+        guard !batches.isEmpty else { completion(false); return }
+        var index = 0
+        var modifierReadiness: ModifierReleaseReadiness?
+        func postNext() {
+            guard valid() else { completion(false); return }
+            let clear = modifiersClear()
+            if modifierReadiness != nil || !clear {
+                let now = ProcessInfo.processInfo.systemUptime
+                let wait = modifierReadiness ?? ModifierReleaseReadiness(start: now, timeout: ConversionTiming.modifierReleaseDeadline,
+                                                                        pollInterval: ConversionTiming.pollInterval)
+                modifierReadiness = wait
+                switch wait.decision(at: now, inputUnchanged: valid(), modifiersClear: clear) {
+                case .ready: break
+                case .wait(let delay):
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { postNext() }
+                    return
+                case .cancelled, .timedOut: completion(false); return
+                }
+            }
+            modifierReadiness = nil
+            postAndAwaitDelivery(batches[index]) { delivered in
+                guard delivered, valid() else { completion(false); return }
+                index += 1
+                if index == batches.count { completion(true) }
+                else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.textPairInterval) { postNext() }
+                }
+            }
+        }
+        postNext()
     }
 
     /// Canvas selection has no truthful external atomic setter. Memory and

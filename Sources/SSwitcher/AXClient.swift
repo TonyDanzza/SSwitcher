@@ -18,7 +18,15 @@ struct AXEditorSnapshot {
     let selectedText: String?
     let subrole: String?
     let parent: AXUIElement?
+    let role: String?
+    let description: String?
     var isSecure: Bool { subrole == kAXSecureTextFieldSubrole }
+    var independentlySelectedText: String? {
+        if let selectedText, !selectedText.isEmpty { return selectedText }
+        guard let value, let range, range.length > 0, range.location <= value.utf16.count,
+              range.length <= value.utf16.count - range.location else { return nil }
+        return (value as NSString).substring(with: range)
+    }
 }
 
 struct AXEditorContext {
@@ -156,7 +164,8 @@ final class AXClient {
     }
 
     func read(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool = true) -> AXEditorSnapshot? {
-        let names = [kAXSelectedTextRangeAttribute, kAXValueAttribute] + (includeContext ? [kAXSelectedTextAttribute, kAXSubroleAttribute, kAXParentAttribute] : [])
+        let names = [kAXSelectedTextRangeAttribute, kAXValueAttribute] + (includeContext ? [kAXSelectedTextAttribute, kAXSubroleAttribute, kAXParentAttribute,
+                                                                                     kAXRoleAttribute, kAXDescriptionAttribute] : [])
         let key = ElementKey(session: application.session, element: editor)
         let now = ProcessInfo.processInfo.systemUptime
         var cached = capabilities.value(for: key, at: now) ?? Capabilities()
@@ -176,7 +185,9 @@ final class AXClient {
         return AXEditorSnapshot(range: range, value: slots[1] as? String,
                                 selectedText: includeContext ? slots[2] as? String : nil,
                                 subrole: includeContext ? slots[3] as? String : nil,
-                                parent: includeContext ? element(slots[4]) : nil)
+                                parent: includeContext ? element(slots[4]) : nil,
+                                role: includeContext ? slots[5] as? String : nil,
+                                description: includeContext ? slots[6] as? String : nil)
     }
 
     func focusMatches(_ context: AXEditorContext) -> Bool {

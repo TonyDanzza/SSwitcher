@@ -133,11 +133,13 @@ final class ConversionCoordinator {
         if selection?.length ?? 0 > 0 || (context.policy.usesCanvasSelection && previous != nil) || selection == nil {
             attempt.trace.setMode(application: context.application, selected: true)
             diagnosticDetails = "Выделение: \(context.application.name)"
-            let expected = previous?.text ?? context.snapshot?.selectedText
+            let expected = previous?.text ?? context.snapshot?.independentlySelectedText
             attempt.previousEntireDocument = previous?.entireDocument == true
             verifiedCanvasSelection = nil
-            if context.policy.requiresMatchingInitialCopy, expected?.isEmpty != false {
-                finish(attempt, outcome: .failure("В Figma выделите символы внутри редактируемого текста")); return
+            if expected?.isEmpty != false {
+                let message = context.policy.requiresMatchingInitialCopy ? "В Figma выделите символы внутри редактируемого текста" :
+                    "Редактор не предоставил подтверждённый выделенный текст"
+                finish(attempt, outcome: .failure(message)); return
             }
             copySelection(attempt, expected: expected, verification: false)
             return
@@ -157,8 +159,6 @@ final class ConversionCoordinator {
         let range = NSRange(location: selection.location - plan.text.utf16.count, length: plan.text.utf16.count)
         attempt.resultRange = NSRange(location: range.location, length: conversion.text.utf16.count)
         attempt.expectedDocument = (document as NSString).replacingCharacters(in: range, with: conversion.text)
-        guard let clipboard = PasteboardTransaction() else { finish(attempt, outcome: .failure("Не удалось сохранить буфер обмена")); return }
-        attempt.clipboard = clipboard
         diagnosticDetails = "Без выделения: \(context.application.name)"
         prepareOverlay(attempt, range: range, text: plan.text)
     }
@@ -193,7 +193,7 @@ final class ConversionCoordinator {
             guard self.valid(attempt) else { self.finish(attempt, outcome: attempt.lifecycle.hasMutated ? .unverified : .cancelled); return }
             if clipboard.hasCopyResult {
                 guard let selected = clipboard.acceptCopyResult(expectedSelectedText: expected,
-                                                                requireMatch: verification || context.policy.requiresMatchingInitialCopy), !selected.isEmpty else {
+                                                                requireMatch: verification || expected != nil || context.policy.requiresMatchingInitialCopy), !selected.isEmpty else {
                     self.finish(attempt, outcome: verification ? .unverified : .failure("Выделите символы текста внутри редактора и повторите")); return
                 }
                 if verification {
@@ -345,55 +345,72 @@ final class ConversionCoordinator {
             // remain selected. Initial matching Copy is the evidence here;
             // preserve the exact range guard only for word/truthful-native mode.
             let range = attempt.selected && context.policy.usesCanvasSelection ? nil : attempt.originalRange
-            return client.validate(context, document: attempt.originalDocument, range: range, includeContext: true) != nil
+            guard let snapshot = client.validate(context, document: attempt.originalDocument, range: range, includeContext: true) else { return false }
+            let originalPolicy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
+            if originalPolicy == .figmaText,
+               context.policy.textControlPolicy(for: context.application, snapshot: snapshot) != .figmaText { return false }
+            return true
         }) { result in
-            guard result == true, self.valid(attempt, mutation: true), let conversion = attempt.converted,
-                  let clipboard = attempt.clipboard else { self.finish(attempt, outcome: .cancelled); return }
-            // Build all word-deletion events and acquire clipboard ownership
-            // before the single irreversible mutation reservation.
-            var keys = Array(repeating: (CGKeyCode(51), CGEventFlags()), count: attempt.deletingCharacters)
-            keys.append((9, .maskCommand))
-            guard let events = KeyboardEvents.sequence(keys), clipboard.write(conversion.text),
+            guard result == true, self.valid(attempt, mutation: true), let conversion = attempt.converted else {
+                self.finish(attempt, outcome: .cancelled); return
+            }
+            // Every replacement payload is embedded in its event before the
+            // one mutation reservation. Nothing ever pastes from .general.
+            let policy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
+            guard let input = UnicodeTextInput(text: conversion.text, controlPolicy: policy) else {
+                self.finish(attempt, outcome: .failure("В этом приложении нельзя безопасно преобразовать такой текст")); return
+            }
+            guard CGPreflightPostEventAccess(), let batches = input.makeEventBatches(deletingCharacters: attempt.deletingCharacters),
                   self.valid(attempt, mutation: true), attempt.lifecycle.commitMutation() else {
                 self.finish(attempt, outcome: .cancelled); return
             }
             attempt.image?.show()
             attempt.trace.begin(.mutation)
-            KeyboardEvents.post(events)
-            attempt.trace.end(.mutation)
-            attempt.trace.begin(.confirmation)
-            attempt.pastedAt = ProcessInfo.processInfo.systemUptime
-            attempt.readiness = ReadinessDeadline(start: attempt.pastedAt, timeout: ConversionTiming.pasteDeadline,
-                                                  pollInterval: ConversionTiming.pollInterval)
-            self.awaitPaste(attempt)
+            KeyboardEvents.postTextReplacement(batches, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { delivered in
+                guard self.attempt === attempt else { return }
+                attempt.trace.end(.mutation)
+                guard delivered, self.valid(attempt) else { self.finish(attempt, outcome: .unverified); return }
+                attempt.trace.begin(.confirmation)
+                attempt.readiness = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.replacementDeadline,
+                                                      pollInterval: ConversionTiming.pollInterval)
+                self.awaitReplacement(attempt)
+            }
         }
     }
 
-    private func awaitPaste(_ attempt: ConversionAttempt) {
+    private func awaitReplacement(_ attempt: ConversionAttempt) {
         guard valid(attempt), let context = attempt.context, var deadline = attempt.readiness else {
             finish(attempt, outcome: .unverified); return
         }
+        if attempt.selected, context.policy.usesCanvasSelection {
+            // Figma's AXValue normalizes paragraph separators differently from
+            // actual selected text. Queue receipt permits the selection batch;
+            // only the final exact real Copy establishes editor success.
+            restoreSelection(attempt)
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         if deadline.expired(at: now) { finish(attempt, outcome: .unverified); return }
-        guard deadline.shouldRead(at: now) else { schedule(attempt, delay: deadline.delay(at: now)) { self.awaitPaste(attempt) }; return }
+        guard deadline.shouldRead(at: now) else { schedule(attempt, delay: deadline.delay(at: now)) { self.awaitReplacement(attempt) }; return }
         attempt.readiness = deadline
-        read(attempt, operation: { client -> PasteReadiness? in
-            guard client.focusMatches(context) else { return PasteReadiness(focusMatches: false, snapshot: nil) }
+        read(attempt, operation: { client -> ReplacementReadiness? in
+            guard client.focusMatches(context) else { return ReplacementReadiness(focusMatches: false, snapshot: nil) }
             let snapshot = context.element.flatMap { client.read($0, application: context.application, includeContext: false) }
-            return PasteReadiness(focusMatches: true, snapshot: snapshot)
+            return ReplacementReadiness(focusMatches: true, snapshot: snapshot)
         }) { readiness in
             guard readiness?.focusMatches == true else { self.finish(attempt, outcome: .unverified); return }
             let acknowledged = attempt.expectedDocument != nil && readiness?.snapshot?.value == attempt.expectedDocument
             if !attempt.selected {
                 if acknowledged { self.confirmed(attempt) }
-                else { self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitPaste(attempt) } }
+                else { self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitReplacement(attempt) } }
                 return
             }
-            let fallbackReady = ProcessInfo.processInfo.systemUptime - attempt.pastedAt >= ConversionTiming.canvasPasteFallback
-            let canRestoreAtomically = context.selectionSettable && context.policy.canSetSelectionThroughAX && attempt.expectedDocument != nil && attempt.resultRange != nil
-            if acknowledged || (fallbackReady && !canRestoreAtomically) {
+            // A target without document evidence uses the already received
+            // event sequence followed by exact selected-text Copy, never a
+            // wall-clock assumption about clipboard consumption.
+            if acknowledged || attempt.expectedDocument == nil {
                 self.restoreSelection(attempt)
-            } else { self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitPaste(attempt) } }
+            } else { self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitReplacement(attempt) } }
         }
     }
 
@@ -488,7 +505,7 @@ final class ConversionCoordinator {
     }
 }
 
-private struct PasteReadiness { let focusMatches: Bool; let snapshot: AXEditorSnapshot? }
+private struct ReplacementReadiness { let focusMatches: Bool; let snapshot: AXEditorSnapshot? }
 
 private final class ConversionAttempt {
     let cancellation = AttemptCancellation()
@@ -515,7 +532,6 @@ private final class ConversionAttempt {
     var canvasSelectionPlan = CanvasSelectionPlan.characters(0)
     var canvasVerification: CanvasSelectionVerification?
     var image: ImageOverlay?
-    var pastedAt = 0.0
     var readiness: ReadinessDeadline?
     var poll: DispatchWorkItem?
     init(frontmostPID: pid_t, trace: ConversionTrace, unchanged: @escaping () -> Bool, activityUnchanged: @escaping () -> Bool,

@@ -69,7 +69,7 @@ final class PasteboardTransactionTests: XCTestCase {
         pasteboard.setString("<span data-buffer=\"scene\"></span>", forType: .html)
         XCTAssertNil(transaction.acceptCopyResult())
         transaction.restore()
-        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+        XCTAssertEqual(pasteboard.string(forType: .string), "not plain selected text")
     }
 
     func testVerificationCopyPreservesOriginalClipboard() throws {
@@ -101,7 +101,7 @@ final class PasteboardTransactionTests: XCTestCase {
             pasteboard.setString("<span data-buffer=\"styled text\"></span>", forType: .html)
             XCTAssertEqual(transaction.acceptCopyResult(expectedSelectedText: expected), expected == "каждого" ? "каждого" : nil)
             transaction.restore()
-            XCTAssertEqual(pasteboard.string(forType: .string), "original")
+            XCTAssertEqual(pasteboard.string(forType: .string), expected == "каждого" ? "original" : "каждого")
         }
     }
 
@@ -117,7 +117,20 @@ final class PasteboardTransactionTests: XCTestCase {
         pasteboard.clearContents(); pasteboard.setString("ghbdtn", forType: .string)
         XCTAssertNil(transaction.acceptCopyResult(expectedSelectedText: "привет", requireMatch: true))
         transaction.restore()
-        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+        XCTAssertEqual(pasteboard.string(forType: .string), "ghbdtn")
+    }
+
+    func testRequiredInitialCopyDoesNotAdoptUnrelatedClipboardWriter() throws {
+        pasteboard.setString("original", forType: .string)
+        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
+        XCTAssertTrue(transaction.write("initial Copy probe"))
+        pasteboard.clearContents()
+        pasteboard.setString("OLD unrelated clipboard", forType: .string)
+        XCTAssertNil(transaction.acceptCopyResult(expectedSelectedText: "ghbdtn", requireMatch: true))
+        XCTAssertFalse(transaction.retainsOwnership)
+        XCTAssertFalse(transaction.write("replacement"))
+        transaction.restore()
+        XCTAssertEqual(pasteboard.string(forType: .string), "OLD unrelated clipboard")
     }
 
     func testRestoredTransactionCannotWriteAfterLateCallback() throws {
