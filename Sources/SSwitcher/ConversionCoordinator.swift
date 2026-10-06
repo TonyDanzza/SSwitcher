@@ -2,8 +2,8 @@ import AppKit
 import Carbon
 import SwitcherCore
 
-/// Main-thread state owner. Each attempt keeps its own clipboard, cancellation
-/// and callback identity; remote AX messages run only through the serial client.
+/// Main-thread state owner. Each attempt keeps its cancellation and callback
+/// identity; remote AX messages run only through the serial client.
 final class ConversionCoordinator {
     enum Outcome { case ignored, cancelled, converted, unverified, failure(String) }
     private let ax = AXClient(policy: .remoteApplication)
@@ -12,19 +12,6 @@ final class ConversionCoordinator {
     let performance = PerformanceRecorder()
     private var attempt: ConversionAttempt?
     private var unconfirmedInput: (() -> Bool)?
-    private struct VerifiedCanvasSelection {
-        let context: AXEditorContext
-        let text: String
-        let entireDocument: Bool
-        let unchanged: () -> Bool
-        func matches(_ current: AXEditorContext) -> Bool {
-            guard context.application.session == current.application.session, unchanged(),
-                  let original = context.element ?? context.focused,
-                  let candidate = current.element ?? current.focused else { return false }
-            return CFEqual(original, candidate)
-        }
-    }
-    private var verifiedCanvasSelection: VerifiedCanvasSelection?
     private(set) var diagnosticDetails = ""
     var isConverting: Bool { attempt != nil }
 
@@ -35,7 +22,6 @@ final class ConversionCoordinator {
 
     func userInputChanged() {
         dispatchPrecondition(condition: .onQueue(.main))
-        verifiedCanvasSelection = nil
         unconfirmedInput = nil
         ax.invalidateGeometry()
         localAX.invalidateGeometry()
@@ -109,6 +95,7 @@ final class ConversionCoordinator {
     private func valid(_ attempt: ConversionAttempt, mutation: Bool = false) -> Bool {
         guard self.attempt === attempt, attempt.lifecycle.canContinue, !attempt.cancellation.isCancelled,
               attempt.unchanged(), !IsSecureEventInputEnabled(),
+              attempt.targetPID.map({ $0 == attempt.frontmostPID }) != false,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == attempt.frontmostPID else { return false }
         return !mutation || attempt.modifiersClear()
     }
@@ -127,153 +114,65 @@ final class ConversionCoordinator {
 
     private func begin(_ attempt: ConversionAttempt, context: AXEditorContext) {
         guard valid(attempt, mutation: true) else { finish(attempt, outcome: .cancelled); return }
-        if context.snapshot?.isSecure == true { finish(attempt, outcome: .failure("В защищённых полях преобразование отключено")); return }
-        let previous = verifiedCanvasSelection.flatMap { $0.matches(context) ? $0 : nil }
-        let selection = context.snapshot?.range
-        if selection?.length ?? 0 > 0 || (context.policy.usesCanvasSelection && previous != nil) || selection == nil {
-            attempt.trace.setMode(application: context.application, selected: true)
-            diagnosticDetails = "Выделение: \(context.application.name)"
-            let expected = previous?.text ?? context.snapshot?.independentlySelectedText
-            attempt.previousEntireDocument = previous?.entireDocument == true
-            verifiedCanvasSelection = nil
-            if expected?.isEmpty != false {
-                let message = context.policy.requiresMatchingInitialCopy ? "В Figma выделите символы внутри редактируемого текста" :
-                    "Редактор не предоставил подтверждённый выделенный текст"
-                finish(attempt, outcome: .failure(message)); return
-            }
-            copySelection(attempt, expected: expected, verification: false)
-            return
+        guard let snapshot = context.snapshot, !snapshot.isSecure else {
+            finish(attempt, outcome: .failure("Редактор не предоставил доступное поле ввода")); return
         }
-        verifiedCanvasSelection = nil
-        attempt.trace.setMode(application: context.application, selected: false)
-        guard let selection, let document = context.snapshot?.value else { finish(attempt, outcome: .failure("Редактор не предоставляет текст у курсора")); return }
-        guard context.valueEditable else { finish(attempt, outcome: .failure("Это поле не подтверждает возможность редактирования")); return }
-        guard let plan = WordCursorPlan(value: document, caret: selection.location) else { finish(attempt, outcome: .ignored); return }
-        guard let conversion = InputSources.prepare(plan.text) else { finish(attempt, outcome: .failure("Добавьте английскую и русскую раскладки")); return }
-        guard conversion.text != plan.text else { finish(attempt, outcome: .ignored); return }
-        guard plan.replacingText(with: conversion.text) != nil else { finish(attempt, outcome: .failure("Для этого слова выделите текст вручную")); return }
+        guard context.valueEditable, context.policy.permitsEditing(snapshot) else {
+            finish(attempt, outcome: .failure("Это поле не подтверждает возможность редактирования")); return
+        }
+        guard let document = snapshot.value, let range = snapshot.range,
+              AccessibilitySelectionPlan.checkedRange(range, in: document) != nil,
+              AccessibilitySelectionPlan.hasSingleRange(range, selectedRanges: snapshot.selectedRanges) else {
+            finish(attempt, outcome: .failure("Редактор не предоставил согласованный текст и диапазон")); return
+        }
         attempt.originalDocument = document
-        attempt.originalRange = selection
+        attempt.originalRange = range
+        attempt.selected = range.length > 0
+        attempt.trace.setMode(application: context.application, selected: attempt.selected)
+        let selection: AccessibilitySelectionPlan
+        if attempt.selected {
+            guard let plan = snapshot.selectionPlan else {
+                finish(attempt, outcome: .failure("Редактор не подтвердил выделенный текст — выделите его заново")); return
+            }
+            selection = plan
+            attempt.selectionPlan = plan
+        } else {
+            guard AccessibilitySelectionPlan.confirmsCaret(document: document, range: range, selectedText: snapshot.selectedText,
+                                                           selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: range) else {
+                finish(attempt, outcome: .failure("Редактор не подтвердил положение курсора")); return
+            }
+            guard let word = WordCursorPlan(value: document, caret: range.location) else { finish(attempt, outcome: .ignored); return }
+            let wordRange = NSRange(location: range.location - word.text.utf16.count, length: word.text.utf16.count)
+            guard let plan = AccessibilitySelectionPlan(document: document, range: wordRange, selectedText: word.text) else {
+                finish(attempt, outcome: .cancelled); return
+            }
+            selection = plan
+            attempt.deletingCharacters = word.selectionSteps
+        }
+        guard let conversion = InputSources.prepare(selection.text) else {
+            finish(attempt, outcome: .failure("Добавьте английскую и русскую раскладки")); return
+        }
+        guard !AccessibilitySelectionPlan.exactlyEqual(conversion.text, selection.text) else { finish(attempt, outcome: .ignored); return }
+        if !attempt.selected, selection.text.count != conversion.text.count {
+            finish(attempt, outcome: .failure("Для этого слова выделите текст вручную")); return
+        }
+        guard let replacement = selection.replacing(with: conversion.text) else {
+            finish(attempt, outcome: .failure("Для этого фрагмента нельзя безопасно восстановить выделение")); return
+        }
         attempt.converted = conversion
-        attempt.deletingCharacters = plan.selectionSteps
-        let range = NSRange(location: selection.location - plan.text.utf16.count, length: plan.text.utf16.count)
-        attempt.resultRange = NSRange(location: range.location, length: conversion.text.utf16.count)
-        attempt.expectedDocument = (document as NSString).replacingCharacters(in: range, with: conversion.text)
-        diagnosticDetails = "Без выделения: \(context.application.name)"
-        prepareOverlay(attempt, range: range, text: plan.text)
-    }
-
-    /// Initial/native Copy is posted once. Canvas verification may repeat only
-    /// Copy within a fixed budget; final proof is always the exact copied text.
-    private func copySelection(_ attempt: ConversionAttempt, expected: String?, verification: Bool) {
-        if verification, attempt.context?.policy.usesCanvasSelection == true {
-            beginCanvasVerification(attempt)
-            return
-        }
-        if verification, valid(attempt), !attempt.observedModifiersClear() {
-            awaitSelectionModifiers(attempt, hardware: false) {
-                self.copySelection(attempt, expected: expected, verification: true)
-            }
-            return
-        }
-        // Verification follows an already guarded restore. Our queued arrows
-        // can temporarily appear as held Shift in HID state; unmarked physical
-        // transitions still block this non-destructive Copy and every batch.
-        let modifiersClear = verification ? attempt.observedModifiersClear() : attempt.modifiersClear()
-        guard let context = attempt.context, valid(attempt), modifiersClear else {
-            finish(attempt, outcome: attempt.lifecycle.hasMutated ? .unverified : .cancelled); return
-        }
-        if attempt.clipboard == nil { attempt.clipboard = PasteboardTransaction() }
-        guard let clipboard = attempt.clipboard,
-              clipboard.write("SSwitcher-copy-\(UUID().uuidString)"), KeyboardEvents.command(8) else {
-            finish(attempt, outcome: attempt.lifecycle.hasMutated ? .unverified : .failure("Не удалось прочитать выделение")); return
-        }
-        let deadline = ProcessInfo.processInfo.systemUptime + ConversionTiming.copyDeadline
-        func inspect() {
-            guard self.valid(attempt) else { self.finish(attempt, outcome: attempt.lifecycle.hasMutated ? .unverified : .cancelled); return }
-            if clipboard.hasCopyResult {
-                guard let selected = clipboard.acceptCopyResult(expectedSelectedText: expected,
-                                                                requireMatch: verification || expected != nil || context.policy.requiresMatchingInitialCopy), !selected.isEmpty else {
-                    self.finish(attempt, outcome: verification ? .unverified : .failure("Выделите символы текста внутри редактора и повторите")); return
-                }
-                if verification {
-                    self.confirmSelection(attempt, text: selected)
-                } else { self.prepareSelection(attempt, selected: selected) }
-            } else if ProcessInfo.processInfo.systemUptime >= deadline {
-                self.finish(attempt, outcome: verification ? .unverified : .failure("Редактор не подтвердил выделение через Copy"))
-            } else { self.schedule(attempt, delay: 0.015, inspect) }
-        }
-        schedule(attempt, delay: 0.015, inspect)
-    }
-
-    private func beginCanvasVerification(_ attempt: ConversionAttempt) {
-        guard let expected = attempt.converted?.text else { finish(attempt, outcome: .unverified); return }
-        awaitSelectionModifiers(attempt, hardware: false) {
-            attempt.canvasVerification = CanvasSelectionVerification(expected: expected, previouslyCopied: attempt.originalSelectedText,
-                                                                      start: ProcessInfo.processInfo.systemUptime,
-                                                                      timeout: ConversionTiming.copyDeadline)
-            self.postCanvasVerificationCopy(attempt)
-        }
-    }
-
-    private func postCanvasVerificationCopy(_ attempt: ConversionAttempt) {
-        awaitSelectionModifiers(attempt, hardware: false) {
-            guard var verification = attempt.canvasVerification, let clipboard = attempt.clipboard,
-                  verification.beginCopy(at: ProcessInfo.processInfo.systemUptime), clipboard.retainsOwnership,
-                  let events = KeyboardEvents.sequence([(8, .maskCommand)]),
-                  clipboard.write("SSwitcher-copy-\(UUID().uuidString)"), self.valid(attempt),
-                  attempt.observedModifiersClear() else {
-                self.diagnosticDetails += "; проверка выделения остановлена"
-                self.finish(attempt, outcome: .unverified); return
-            }
-            attempt.canvasVerification = verification
-            KeyboardEvents.postAndAwaitDelivery(events) { delivered in
-                guard delivered, self.valid(attempt) else {
-                    self.diagnosticDetails += "; доставка Copy не подтверждена"
-                    self.finish(attempt, outcome: .unverified); return
-                }
-                self.inspectCanvasVerification(attempt)
-            }
-        }
-    }
-
-    private func inspectCanvasVerification(_ attempt: ConversionAttempt) {
-        guard valid(attempt), let verification = attempt.canvasVerification, let clipboard = attempt.clipboard else {
-            finish(attempt, outcome: .unverified); return
-        }
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now < verification.expiresAt else {
-            diagnosticDetails += "; истёк срок подтверждения выделения"
-            finish(attempt, outcome: .unverified); return
-        }
-        switch clipboard.acceptVerificationCopy(verification) {
-        case .waiting:
-            schedule(attempt, delay: min(ConversionTiming.pollInterval, verification.expiresAt - now)) {
-                self.inspectCanvasVerification(attempt)
-            }
-        case .rejected:
-            diagnosticDetails += "; Copy не совпал с заменённым выделением"
-            finish(attempt, outcome: .unverified)
-        case .copied(let text):
-            switch verification.decision(copied: text, at: now) {
-            case .confirmed: confirmSelection(attempt, text: text)
-            case .retry:
-                diagnosticDetails += "; повторная проверка Copy"
-                schedule(attempt, delay: ConversionTiming.pollInterval) { self.postCanvasVerificationCopy(attempt) }
-            case .unverified:
-                diagnosticDetails += "; выделение осталось неполным"
-                finish(attempt, outcome: .unverified)
-            }
-        }
+        attempt.replacement = replacement
+        attempt.canvasSelectionPlan = CanvasSelectionPlan(selection: selection, replacementText: conversion.text)
+        diagnosticDetails = "\(attempt.selected ? "Выделение" : "Без выделения"): \(context.application.name)"
+        prepareOverlay(attempt, range: selection.range, text: selection.text)
     }
 
     /// A second Shift gesture is drained, not queued as another replacement.
-    /// At these non-destructive boundaries it may release before we continue;
-    /// all other input/focus changes still invalidate the attempt immediately.
-    private func awaitSelectionModifiers(_ attempt: ConversionAttempt, hardware: Bool,
+    /// It may release before selection restoration; other input/focus changes
+    /// invalidate the attempt immediately. Polling never extends this budget.
+    private func awaitSelectionModifiers(_ attempt: ConversionAttempt,
                                          readiness: ModifierReleaseReadiness? = nil, _ operation: @escaping () -> Void) {
         guard valid(attempt) else { finish(attempt, outcome: .unverified); return }
-        let clear = hardware ? attempt.modifiersClear() : attempt.observedModifiersClear()
+        let clear = attempt.modifiersClear()
         if readiness == nil, clear { operation(); return }
         let now = ProcessInfo.processInfo.systemUptime
         let wait = readiness ?? ModifierReleaseReadiness(start: now, timeout: ConversionTiming.modifierReleaseDeadline,
@@ -281,41 +180,12 @@ final class ConversionCoordinator {
         switch wait.decision(at: now, inputUnchanged: valid(attempt), modifiersClear: clear) {
         case .ready: operation()
         case .wait(let delay):
-            schedule(attempt, delay: delay) {
-                self.awaitSelectionModifiers(attempt, hardware: hardware, readiness: wait, operation)
-            }
+            schedule(attempt, delay: delay) { self.awaitSelectionModifiers(attempt, readiness: wait, operation) }
         case .cancelled: finish(attempt, outcome: .unverified)
         case .timedOut:
             diagnosticDetails += "; Shift не отпущен для восстановления выделения"
             finish(attempt, outcome: .unverified)
         }
-    }
-
-    private func prepareSelection(_ attempt: ConversionAttempt, selected: String) {
-        guard let context = attempt.context, let conversion = InputSources.prepare(selected) else {
-            finish(attempt, outcome: .failure("Добавьте английскую и русскую раскладки")); return
-        }
-        guard conversion.text != selected else { finish(attempt, outcome: .ignored); return }
-        attempt.selected = true
-        attempt.converted = conversion
-        attempt.originalSelectedText = selected
-        attempt.canvasSelectionPlan = attempt.previousEntireDocument ? .entireDocument :
-            CanvasSelectionPlan(copiedText: selected, replacementText: conversion.text,
-                                document: context.snapshot?.value, range: context.snapshot?.range)
-        if let range = context.snapshot?.range, range.length > 0,
-           let document = context.snapshot?.value, range.location <= document.utf16.count,
-           range.length <= document.utf16.count - range.location,
-           (document as NSString).substring(with: range) == selected {
-            attempt.originalDocument = document
-            attempt.originalRange = range
-            attempt.expectedDocument = (document as NSString).replacingCharacters(in: range, with: conversion.text)
-            attempt.resultRange = NSRange(location: range.location, length: conversion.text.utf16.count)
-        } else if context.snapshot?.value != nil, context.snapshot?.range?.length ?? 0 > 0,
-                  context.selectionSettable && context.policy.canSetSelectionThroughAX {
-            // Never guess a native range when Copy and AX disagree.
-            finish(attempt, outcome: .failure("Редактор изменил выделение — повторите")); return
-        }
-        prepareOverlay(attempt, range: attempt.originalRange, text: selected)
     }
 
     private func prepareOverlay(_ attempt: ConversionAttempt, range: NSRange?, text: String) {
@@ -338,130 +208,160 @@ final class ConversionCoordinator {
 
     private func validateBeforeMutation(_ attempt: ConversionAttempt) {
         guard let context = attempt.context else { finish(attempt, outcome: .cancelled); return }
-        read(attempt, operation: { client -> Bool? in
-            guard client.focusMatches(context) else { return false }
-            guard context.element != nil else { return attempt.selected }
-            // Copy may collapse Figma's AX mirror while the real characters
-            // remain selected. Initial matching Copy is the evidence here;
-            // preserve the exact range guard only for word/truthful-native mode.
-            let range = attempt.selected && context.policy.usesCanvasSelection ? nil : attempt.originalRange
-            guard let snapshot = client.validate(context, document: attempt.originalDocument, range: range, includeContext: true) else { return false }
-            let originalPolicy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
-            if originalPolicy == .figmaText,
-               context.policy.textControlPolicy(for: context.application, snapshot: snapshot) != .figmaText { return false }
-            return true
-        }) { result in
-            guard result == true, self.valid(attempt, mutation: true), let conversion = attempt.converted else {
+        read(attempt, operation: { client -> TextReplacementBackend? in
+            guard let document = attempt.originalDocument, let range = attempt.originalRange,
+                  let snapshot = client.validate(context, document: document, range: range, includeContext: true),
+                  client.isEditable(context, snapshot: snapshot),
+                  context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return nil }
+            let matches: Bool
+            if let selection = attempt.selectionPlan {
+                matches = selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
+                                            selectedRanges: snapshot.selectedRanges)
+            } else {
+                matches = AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
+                                                                    selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: range)
+            }
+            guard matches else { return nil }
+            return client.replacementBackend(context, snapshot: snapshot, selected: attempt.selected)
+        }) { backend in
+            guard let backend, self.valid(attempt, mutation: true), let conversion = attempt.converted else {
                 self.finish(attempt, outcome: .cancelled); return
             }
-            // Every replacement payload is embedded in its event before the
-            // one mutation reservation. Nothing ever pastes from .general.
-            let policy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
-            guard let input = UnicodeTextInput(text: conversion.text, controlPolicy: policy) else {
-                self.finish(attempt, outcome: .failure("В этом приложении нельзя безопасно преобразовать такой текст")); return
-            }
-            guard CGPreflightPostEventAccess(), let batches = input.makeEventBatches(deletingCharacters: attempt.deletingCharacters),
-                  self.valid(attempt, mutation: true), attempt.lifecycle.commitMutation() else {
-                self.finish(attempt, outcome: .cancelled); return
-            }
-            attempt.image?.show()
-            attempt.trace.begin(.mutation)
-            KeyboardEvents.postTextReplacement(batches, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { delivered in
-                guard self.attempt === attempt else { return }
-                attempt.trace.end(.mutation)
-                guard delivered, self.valid(attempt) else { self.finish(attempt, outcome: .unverified); return }
-                attempt.trace.begin(.confirmation)
-                attempt.readiness = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.replacementDeadline,
-                                                      pollInterval: ConversionTiming.pollInterval)
-                self.awaitReplacement(attempt)
-            }
+            if backend == .accessibilitySelectedText {
+                guard let selection = attempt.selectionPlan, TextReplacementBackend.acceptsNativeText(conversion.text) else {
+                    self.finish(attempt, outcome: .failure("Этот текст нельзя безопасно преобразовать в редакторе")); return
+                }
+                guard self.reserveMutation(attempt) else { self.finish(attempt, outcome: .cancelled); return }
+                self.diagnosticDetails += "; прямая замена Accessibility"
+                self.read(attempt, operation: {
+                    $0.replaceSelectedText(context, selection: selection, replacement: conversion.text, cancellation: attempt.cancellation)
+                }) { issued in
+                    // Failure or false success must never fall through to
+                    // Unicode input: an in-flight setter may already edit.
+                    self.mutationDelivered(attempt, delivered: issued == true)
+                }
+            } else { self.postUnicodeReplacement(attempt, context: context, text: conversion.text) }
         }
     }
 
-    private func awaitReplacement(_ attempt: ConversionAttempt) {
-        guard valid(attempt), let context = attempt.context, var deadline = attempt.readiness else {
-            finish(attempt, outcome: .unverified); return
+    private func reserveMutation(_ attempt: ConversionAttempt) -> Bool {
+        guard valid(attempt, mutation: true), attempt.lifecycle.commitMutation() else { return false }
+        attempt.image?.show()
+        attempt.trace.begin(.mutation)
+        return true
+    }
+
+    private func postUnicodeReplacement(_ attempt: ConversionAttempt, context: AXEditorContext, text: String) {
+        // Construct every payload before reserving the one mutation. Neither
+        // transport reads a shared clipboard or replaces the complete AXValue.
+        let policy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
+        guard let input = UnicodeTextInput(text: text, controlPolicy: policy) else {
+            finish(attempt, outcome: .failure("В этом приложении нельзя безопасно преобразовать такой текст")); return
         }
-        if attempt.selected, context.policy.usesCanvasSelection {
-            // Figma's AXValue normalizes paragraph separators differently from
-            // actual selected text. Queue receipt permits the selection batch;
-            // only the final exact real Copy establishes editor success.
-            restoreSelection(attempt)
-            return
+        guard CGPreflightPostEventAccess(), let batches = input.makeEventBatches(deletingCharacters: attempt.deletingCharacters),
+              reserveMutation(attempt) else { finish(attempt, outcome: .cancelled); return }
+        KeyboardEvents.postTextReplacement(batches, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { delivered in
+            self.mutationDelivered(attempt, delivered: delivered)
         }
+    }
+
+    private func mutationDelivered(_ attempt: ConversionAttempt, delivered: Bool) {
+        guard self.attempt === attempt else { return }
+        attempt.trace.end(.mutation)
+        guard delivered, valid(attempt) else { finish(attempt, outcome: .unverified); return }
+        attempt.trace.begin(.confirmation)
+        beginAcknowledgement(attempt)
+        awaitAcknowledgement(attempt, selection: false)
+    }
+
+    private func beginAcknowledgement(_ attempt: ConversionAttempt) {
+        attempt.readiness = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.replacementDeadline,
+                                              pollInterval: ConversionTiming.pollInterval)
+    }
+
+    /// Event receipt only paces delivery. A fixed AX polling budget must prove
+    /// both the complete document and the exact resulting caret/selection.
+    private func awaitAcknowledgement(_ attempt: ConversionAttempt, selection: Bool) {
+        guard valid(attempt), let context = attempt.context, let replacement = attempt.replacement,
+              var deadline = attempt.readiness else { finish(attempt, outcome: .unverified); return }
         let now = ProcessInfo.processInfo.systemUptime
         if deadline.expired(at: now) { finish(attempt, outcome: .unverified); return }
-        guard deadline.shouldRead(at: now) else { schedule(attempt, delay: deadline.delay(at: now)) { self.awaitReplacement(attempt) }; return }
+        guard deadline.shouldRead(at: now) else {
+            schedule(attempt, delay: deadline.delay(at: now)) { self.awaitAcknowledgement(attempt, selection: selection) }; return
+        }
         attempt.readiness = deadline
-        read(attempt, operation: { client -> ReplacementReadiness? in
-            guard client.focusMatches(context) else { return ReplacementReadiness(focusMatches: false, snapshot: nil) }
-            let snapshot = context.element.flatMap { client.read($0, application: context.application, includeContext: false) }
-            return ReplacementReadiness(focusMatches: true, snapshot: snapshot)
-        }) { readiness in
-            guard readiness?.focusMatches == true else { self.finish(attempt, outcome: .unverified); return }
-            let acknowledged = attempt.expectedDocument != nil && readiness?.snapshot?.value == attempt.expectedDocument
-            if !attempt.selected {
-                if acknowledged { self.confirmed(attempt) }
-                else { self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitReplacement(attempt) } }
-                return
+        read(attempt, operation: { $0.acknowledgement(context) }) { result in
+            guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else {
+                self.finish(attempt, outcome: .unverified); return
             }
-            // A target without document evidence uses the already received
-            // event sequence followed by exact selected-text Copy, never a
-            // wall-clock assumption about clipboard consumption.
-            if acknowledged || attempt.expectedDocument == nil {
-                self.restoreSelection(attempt)
-            } else { self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitReplacement(attempt) } }
+            let snapshot: AXEditorSnapshot
+            switch result {
+            case .snapshot(let value): snapshot = value
+            case .busy:
+                self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt, selection: selection) }
+                return
+            case .invalid, nil: self.finish(attempt, outcome: .unverified); return
+            }
+            let acknowledged: Bool
+            if selection {
+                acknowledged = replacement.confirmsSelection(document: snapshot.value, range: snapshot.range,
+                                                              selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges)
+            } else {
+                acknowledged = AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range,
+                                                                         selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges,
+                                                                         expectedDocument: replacement.document, expectedCaret: replacement.caret)
+            }
+            if acknowledged {
+                if selection || !attempt.selected { self.confirmed(attempt) }
+                else { self.restoreSelection(attempt) }
+            } else {
+                self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt, selection: selection) }
+            }
         }
     }
 
     private func restoreSelection(_ attempt: ConversionAttempt) {
-        awaitSelectionModifiers(attempt, hardware: true) { self.restoreSelectionWithModifiersReleased(attempt) }
+        awaitSelectionModifiers(attempt) { self.restoreSelectionWithModifiersReleased(attempt) }
     }
 
     private func restoreSelectionWithModifiersReleased(_ attempt: ConversionAttempt) {
-        guard valid(attempt, mutation: true), let context = attempt.context, let conversion = attempt.converted else { finish(attempt, outcome: .unverified); return }
-        if context.selectionSettable, context.policy.canSetSelectionThroughAX,
-           let document = attempt.expectedDocument, let range = attempt.resultRange {
-            // A single native range update avoids fragmented long-selection
-            // rendering. This path is never used in word mode or Figma canvas.
-            read(attempt, operation: { $0.restoreSelection(context, document: document, range: range, cancellation: attempt.cancellation) }) { restored in
-                guard restored == true else { self.finish(attempt, outcome: .unverified); return }
-                self.copySelection(attempt, expected: conversion.text, verification: true)
-            }
-        } else {
-            // The full hardware guard above is required before the first
-            // arrow. Between batches, own queued Shift must not look physical.
-            let plan = context.policy.usesCanvasSelection ? attempt.canvasSelectionPlan : .characters(conversion.text.count)
-            diagnosticDetails += plan == .entireDocument ? "; восстановление всего текста" : "; восстановление части текста"
-            KeyboardEvents.restoreCanvasSelection(plan: plan,
-                                                   valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { restored in
-                guard restored else {
-                    self.diagnosticDetails += "; доставка выделения не подтверждена"
-                    self.finish(attempt, outcome: .unverified); return
-                }
-                self.copySelection(attempt, expected: conversion.text, verification: true)
-            }
+        guard valid(attempt, mutation: true), let context = attempt.context, let replacement = attempt.replacement else {
+            finish(attempt, outcome: .unverified); return
         }
-    }
-
-    private func confirmSelection(_ attempt: ConversionAttempt, text: String) {
-        guard let context = attempt.context, text == attempt.converted?.text else { finish(attempt, outcome: .unverified); return }
-        if context.policy.usesCanvasSelection {
-            diagnosticDetails += "; выделение подтверждено Copy"
-            verifiedCanvasSelection = VerifiedCanvasSelection(context: context, text: text,
-                                                              entireDocument: attempt.canvasSelectionPlan == .entireDocument,
-                                                              unchanged: attempt.unchanged)
-            confirmed(attempt)
+        if context.selectionSettable, context.policy.canSetSelectionThroughAX(context.snapshot) {
+            // One range setter preserves native long-selection rendering. A
+            // success reply still requires fresh AX proof and is never retried.
+            read(attempt, operation: {
+                $0.restoreSelection(context, document: replacement.document, caret: replacement.caret,
+                                    range: replacement.range, cancellation: attempt.cancellation)
+            }) { restored in
+                guard restored == true else { self.finish(attempt, outcome: .unverified); return }
+                self.beginAcknowledgement(attempt)
+                self.awaitAcknowledgement(attempt, selection: true)
+            }
         } else {
+            // A physical Shift wait may outlive our first caret proof. Read it
+            // again before sending one keyboard restoration, never a retry.
             read(attempt, operation: { client -> Bool? in
-                if let document = attempt.expectedDocument, let range = attempt.resultRange {
-                    return client.validate(context, document: document, range: range) != nil
+                guard let snapshot = client.validate(context, document: replacement.document, range: replacement.caret, includeContext: true),
+                      client.isEditable(context, snapshot: snapshot),
+                      context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return false }
+                return AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
+                                                                  selectedRanges: snapshot.selectedRanges, expectedDocument: replacement.document,
+                                                                  expectedCaret: replacement.caret)
+            }) { ready in
+                guard ready == true, self.valid(attempt, mutation: true) else { self.finish(attempt, outcome: .unverified); return }
+                let plan = context.usesCanvasSelection ? attempt.canvasSelectionPlan : .characters(replacement.text.count)
+                self.diagnosticDetails += plan == .entireDocument ? "; восстановление всего текста" : "; восстановление части текста"
+                KeyboardEvents.restoreCanvasSelection(plan: plan, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { restored in
+                    guard self.attempt === attempt else { return }
+                    guard restored else {
+                        self.diagnosticDetails += "; доставка выделения не подтверждена"
+                        self.finish(attempt, outcome: .unverified); return
+                    }
+                    self.beginAcknowledgement(attempt)
+                    self.awaitAcknowledgement(attempt, selection: true)
                 }
-                return client.focusMatches(context)
-            }) { result in
-                guard result == true else { self.finish(attempt, outcome: .unverified); return }
-                self.diagnosticDetails += "; выделение подтверждено Copy"
-                self.confirmed(attempt)
             }
         }
     }
@@ -494,18 +394,15 @@ final class ConversionCoordinator {
         attempt.cancellation.cancel()
         attempt.poll?.cancel(); attempt.poll = nil
         KeyboardEvents.cancelDelivery()
-        attempt.clipboard?.restore(); attempt.clipboard = nil
         let confirmed: Bool
         if case .converted = outcome { confirmed = true } else { confirmed = false; attempt.image?.close(); overlay.cancel() }
         if case .unverified = outcome { unconfirmedInput = attempt.unchanged; diagnosticDetails += "; результат не подтверждён" }
-        if case .cancelled = outcome { diagnosticDetails += "; отменено до вставки" }
+        if case .cancelled = outcome { diagnosticDetails += "; отменено до ввода" }
         attempt.trace.finish(confirmed: confirmed)
         self.attempt = nil
         attempt.completion(outcome)
     }
 }
-
-private struct ReplacementReadiness { let focusMatches: Bool; let snapshot: AXEditorSnapshot? }
 
 private final class ConversionAttempt {
     let cancellation = AttemptCancellation()
@@ -519,18 +416,14 @@ private final class ConversionAttempt {
     let completion: (ConversionCoordinator.Outcome) -> Void
     var context: AXEditorContext?
     var targetPID: pid_t?
-    var clipboard: PasteboardTransaction?
     var converted: InputSources.Conversion?
     var originalDocument: String?
     var originalRange: NSRange?
-    var resultRange: NSRange?
-    var expectedDocument: String?
+    var selectionPlan: AccessibilitySelectionPlan?
+    var replacement: AccessibilityReplacementPlan?
     var deletingCharacters = 0
     var selected = false
-    var originalSelectedText = ""
-    var previousEntireDocument = false
     var canvasSelectionPlan = CanvasSelectionPlan.characters(0)
-    var canvasVerification: CanvasSelectionVerification?
     var image: ImageOverlay?
     var readiness: ReadinessDeadline?
     var poll: DispatchWorkItem?

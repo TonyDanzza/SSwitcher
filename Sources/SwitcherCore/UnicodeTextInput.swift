@@ -22,7 +22,7 @@ public struct UnicodeTextInput {
     /// larger than the supported event size is rejected before any mutation.
     public init?(text: String, controlPolicy: ControlPolicy = .singleLine,
                  maximumUTF16UnitsPerEvent: Int = 20) {
-        guard !text.isEmpty, maximumUTF16UnitsPerEvent > 0 else { return nil }
+        guard !text.isEmpty, !AccessibilitySelectionPlan.hasTextAttachment(text), maximumUTF16UnitsPerEvent > 0 else { return nil }
         // Return and Tab can submit a message or move focus in another app.
         // Control handling must be demonstrated for the specific editor.
         for scalar in text.unicodeScalars {

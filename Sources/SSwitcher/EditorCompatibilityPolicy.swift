@@ -21,16 +21,28 @@ struct EditorApplication {
     }
 }
 
-/// Figma's AX selection can describe a stale canvas mirror. Centralize the
-/// exception: never use AX to set that canvas selection or confirm success.
+/// Figma's canvas setters can report success without changing visible text.
+/// Read fresh coherent evidence, but never write its text/value/selection mirror.
 struct EditorCompatibilityPolicy {
-    let usesCanvasSelection: Bool
-    init(application: EditorApplication) { usesCanvasSelection = application.bundleID == "com.figma.Desktop" }
-    var allowsTransientFocus: Bool { usesCanvasSelection }
-    var requiresMatchingInitialCopy: Bool { usesCanvasSelection }
-    var canSetSelectionThroughAX: Bool { !usesCanvasSelection }
+    let isFigma: Bool
+    init(application: EditorApplication) { isFigma = application.bundleID == "com.figma.Desktop" }
+    func isCanvasTextEditor(_ snapshot: AXEditorSnapshot?) -> Bool {
+        AccessibilityEditorPolicy.isFigmaCanvas(isFigma: isFigma, role: snapshot?.role, description: snapshot?.description)
+    }
+    func canSetSelectionThroughAX(_ snapshot: AXEditorSnapshot?) -> Bool { !isCanvasTextEditor(snapshot) }
+    func permitsEditing(_ snapshot: AXEditorSnapshot) -> Bool {
+        AccessibilityEditorPolicy.permitsEditing(isFigma: isFigma, role: snapshot.role, description: snapshot.description)
+    }
+    func replacementBackend(for application: EditorApplication, snapshot: AXEditorSnapshot, selected: Bool,
+                            selectedTextSettable: Bool) -> TextReplacementBackend {
+        .select(isSelected: selected, bundleID: application.bundleID,
+                isCurrentProcess: application.pid == ProcessInfo.processInfo.processIdentifier,
+                isElectron: application.isElectron, role: snapshot.role, selectedTextSettable: selectedTextSettable)
+    }
     func textControlPolicy(for application: EditorApplication, snapshot: AXEditorSnapshot?) -> UnicodeTextInput.ControlPolicy {
+        // Only public range-string/end-point proof enables Figma Return/ShiftReturn
+        // semantics. AXValue paragraph normalization is never guessed.
         .forEditor(isCurrentProcess: application.pid == ProcessInfo.processInfo.processIdentifier,
-                   isFigma: usesCanvasSelection, role: snapshot?.role, description: snapshot?.description)
+                   isFigma: isCanvasTextEditor(snapshot) && snapshot?.usesCanonicalText == true, role: snapshot?.role, description: snapshot?.description)
     }
 }

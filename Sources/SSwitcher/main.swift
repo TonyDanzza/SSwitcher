@@ -51,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .ignored: self.lastResult = "Курсор должен стоять в конце слова"
                 case .cancelled: self.lastResult = "Замена отменена: ввод или активное поле изменились"
                 case .converted: self.lastResult = "Текст заменён — подтверждено редактором"
-                case .unverified: self.lastResult = "Вставка отправлена; проверьте текст и выделите его заново"
+                case .unverified: self.lastResult = "Результат замены не подтверждён; проверьте текст и выделите его заново"
                 case .failure(let message):
                     self.lastResult = message
                     NSSound.beep()

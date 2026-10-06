@@ -1,0 +1,59 @@
+# Native text conversion research — 2026-10-06
+
+Version 0.1.10 removes all conversion-path clipboard access and Copy/Paste commands. It uses fresh coherent Accessibility evidence, a proven selected-text setter in TextEdit/its own NSTextView, and prebuilt Unicode events in other editors. Independent live review verified the native and Figma fixtures recorded below and in validation.md. This document records the public API and implementation evidence behind that choice.
+
+## What the public macOS interfaces provide
+
+| Interface | Supported operation | Constraint for SSwitcher |
+| --- | --- | --- |
+| Accessibility selected text, value and selected range | Read a participating application's text and selection. A settable selected range can restore a selection. | The application supplies the data. Slots may be missing or inconsistent; a successful setter is not proof of a visible edit. |
+| `CGEvent.keyboardSetUnicodeString` | Embed a finished Unicode string in a keyboard event. | Apple warns that application frameworks can ignore that string and translate the virtual key themselves. Queue receipt is separate from editor acknowledgement. |
+| `NSTextInputClient.insertText` | Insert text into the receiving text view, replacing a specified range. | This is a method on a participating `NSView`/`NSTextView` receiver, not an API that gives a menu-bar utility an arbitrary other-process text view. |
+| InputMethodKit | Supply text through client sessions belonging to an input method. | A custom input method receives a real client session. Adopting this would require a separate installed input method and user selection of it, rather than providing a global editing client for the current utility. |
+| Accessibility text markers | Represent and navigate positions and selections in an engine that implements them. | Marker bytes belong to the target engine and are opaque to assistive clients. They provide richer position/read operations, not a universal text replacement transaction. |
+| macOS Services | Exchange input and output data with a service provider. | `NSPerformService` requires the caller to supply a pasteboard already containing the service's input. It does not fetch and replace any arbitrary focused selection. |
+
+The distinction between in-process text views, input-method client sessions and external Accessibility objects follows from the documented receiver/session contracts. The conclusion that none gives this utility universal confirmed replacement is an architectural inference, not an Apple promise about every application.
+
+The local macOS SDK confirms `AXSelectedText`, `AXSelectedTextRange`, `AXSelectedTextRanges`, `AXNumberOfCharacters` and parameterized `AXStringForRange`. Its `AXWebConstants.h` documents text-marker indices as UTF-16 units and marker payloads as engine-owned opaque positions. The current SDK's marker declarations do not by themselves establish compatibility with the application's macOS 13 baseline.
+
+## Caramba and other macOS implementations
+
+The [Caramba official site](https://caramba-switcher.com/en/) describes automatic conversion and double-Shift undo. It also states that it cannot work or disable itself correctly in every application/browser window, and that RDP is unsupported. The [official secure-input help](https://caramba-switcher.com/help/secure-input/) explains the restriction when another application enables secure input. The inspected official pages do not document Caramba's selected-text transport or claim that it never touches the clipboard. Live observation can establish its behavior in a fixture; it cannot establish its internal algorithm. Historic press excerpts on the site are not sufficient evidence of the current Mac version's shortcuts.
+
+[UASwitcher's source](https://github.com/deimoc/UASwitcher/blob/main/Sources/UASwitcher/TextConverter.swift) uses Unicode events for a word accumulated from typed keys. Its selected-text path falls back to `convertViaClipboard`, issues Copy and Paste, and schedules clipboard restoration. Its README's “clipboard-free” description therefore does not apply to every selected-text conversion. Its timed clipboard fallback would preserve the dependency that this change intends to remove.
+
+[Traple's SelectionService](https://github.com/spendolas/traple/blob/main/Sources/SelectionService.swift) reads `AXSelectedText` and replaces it through the same attribute. Its comment warns that Electron/web inputs can silently fail. The function treats a successful setter return as success without checking the resulting document or selected range. SSwitcher's earlier independent Figma probe already found that exact failure: a reported successful setter did not change the visible canvas or actual copied characters. That method is unsuitable for the tested Figma editor.
+
+[AutoSwitcher](https://github.com/emkaraid/AutoSwitcher) explicitly documents its selected-text conversion through the clipboard with restoration. Its README places the event tap on the main run loop and marks its generated events. SSwitcher already uses a main-run-loop listening tap and distinct synthetic delivery markers. These architectural choices do not supply a clipboard-independent external selection transaction.
+
+A scoped native NSTextView comparison of installed Caramba 2026.09.22 converted the 17-UTF-16-unit fixture `ghbdtn vbh 🙂 é\n` to Russian. The observed events included Command+C and Command+V from Caramba's process. Pasteboard revision changed from 1911 to 1915 across five observed revisions, then all readable formats/data matched the original snapshot. The resulting selection was a caret at offset 17, so the selected fragment was not retained in this fixture. A subsequent unselected-caret gesture left the fixture unchanged and issued only Copy. This is black-box fixture evidence, not a claim about every Caramba path or its internal code. Reading lazy pasteboard providers can trigger their data provision; concurrent clipboard managers can also affect revision observations.
+
+These projects demonstrate usable public mechanisms and their tradeoffs. Their source comments and README claims are not compatibility measurements for SSwitcher.
+
+## Implemented clipboard-independent path
+
+1. Read the current editable text element and a coherent document/range/selected-text snapshot. Validate UTF-16 bounds and whole grapheme boundaries. When an attribute is supplied, it must agree exactly, including its UTF-16 representation. Refuse missing, inconsistent or noncontiguous scope before editing.
+2. Prepare the finished replacement before reserving the attempt's one mutation. A fresh settable AXSelectedText query permits one selected-fragment setter only in tested TextEdit/own NSTextView; other editors use all prebuilt immutable Unicode events. Word mode always retains Backspace + Unicode input. Recheck the same focus, input generation, document and range immediately before mutation.
+3. Pace the existing keyboard transport through delivery receipts while preserving modifier waits, cancellation and the burst guard. Do not use Copy, Paste, cut, clipboard probes or clipboard restoration.
+4. Require fresh expected document/caret evidence before restoring a selected result. Use one verified native selected-range setter where supported; keep the tested Figma keyboard policy separate. Never use Figma's false-success text/value setters.
+5. Poll for the exact expected document, range and selected text within a fixed deadline. An unverified edit must stop further events and must not trigger another mutation or clipboard fallback.
+
+A read-only Figma fixture established an actual 21-unit document containing hard LF, consecutive LF and U+2028, while AXValue reported 23 units. AXStringForRange(0,21) returned the exact physical 21 units; (21,0) returned an empty string; (21,1), (0,22) and (0,23) returned explicit NoValue (-25212). Prefix (0,20) and partial (7,3) also returned exact physical characters. Start/end text markers were available but both indices returned zero, so they are excluded from extent proof.
+
+The scoped canonical provider obtains the document through that public range API and proves its endpoint within fixed time/query bounds. It checks exact repeated strings and fresh unchanged raw evidence, never strips LF or treats a generic nil/IPC failure as an endpoint. Only this demonstrated Figma editor may interpret NoValue as a range bound. Other unsupported/inconsistent cases are refused before editing. Independent clean-candidate review passed whole, partial and word roundtrips on the 21-unit hard/consecutive/soft-line fixture. A separate 22-unit emoji/decomposed-accent multiline fixture passed whole conversion and exactly one reverse conversion during a 40-tap Shift burst, with exact final text and selection. These are scoped Figma observations, not a universal AXStringForRange or line-key contract.
+
+## Apple sources
+
+- [Accessibility for AppKit](https://developer.apple.com/documentation/appkit/accessibility-for-appkit)
+- [NSAccessibilityProtocol](https://developer.apple.com/documentation/appkit/nsaccessibilityprotocol)
+- [AXUIElementCopyParameterizedAttributeValue](https://developer.apple.com/documentation/applicationservices/1461203-axuielementcopyparameterizedattr): reads a supplied parameterized attribute; it does not establish a universal NoValue end-of-text contract.
+- [AXUIElementCopyMultipleAttributeValues](https://developer.apple.com/documentation/applicationservices/1462051-axuielementcopymultipleattribute)
+- [CGEvent.keyboardSetUnicodeString](https://developer.apple.com/documentation/coregraphics/cgevent/keyboardsetunicodestring(stringlength:unicodestring:))
+- [NSTextInputClient](https://developer.apple.com/documentation/appkit/nstextinputclient) and [insertText(_:replacementRange:)](https://developer.apple.com/documentation/appkit/nstextinputclient/inserttext(_:replacementrange:))
+- [InputMethodKit](https://developer.apple.com/documentation/inputmethodkit)
+- [NSPerformService](https://developer.apple.com/documentation/appkit/nsperformservice(_:_:))
+
+The final 108-test suite passed locally and independently. The selection planner, editor policy and clipboard boundary regressions cover exact scope and repeated text, absent/inconsistent evidence, invalid and overflowing offsets, surrogate/composed-grapheme boundaries, canonical-equivalence offset mismatches, multiline replacement offsets, untouched neighbors and rejection of replacements that merge with a neighboring grapheme. Two additional regressions cover a native TextEdit field's optional AXDescription failure: that missing label may not discard otherwise coherent text evidence or authorize Figma's canvas policy, and failures in text/range/role/security attributes remain refusals. These tests establish core safety/transport behavior; application compatibility comes from separately recorded live fixtures.
+
+An external scratch TextEdit AXTextArea probe replaced the selected 17-unit multiline fixture through AXSelectedText in 11.03 ms. Fresh AXValue and caret matched the expected Russian result, including LF, emoji and decomposed accent. This establishes the tested native branch's behavior, not a general AppKit setter guarantee. The integrated backend still requires exact document/caret/range acknowledgement and never retries or falls back after issuing its setter. It edits the selected fragment rather than replacing full AXValue; preservation of every mixed rich-text style is not established by the plain fixture.

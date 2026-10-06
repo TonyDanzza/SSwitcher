@@ -12,21 +12,34 @@ final class AttemptCancellation {
     func cancel() { lock.lock(); cancelled = true; lock.unlock() }
 }
 
+enum AXSnapshotRead { case snapshot(AXEditorSnapshot), busy, invalid }
+
 struct AXEditorSnapshot {
     let range: NSRange?
     let value: String?
     let selectedText: String?
+    let selectedRanges: [NSRange]?
     let subrole: String?
     let parent: AXUIElement?
     let role: String?
     let description: String?
+    var usesCanonicalText = false
     var isSecure: Bool { subrole == kAXSecureTextFieldSubrole }
-    var independentlySelectedText: String? {
-        if let selectedText, !selectedText.isEmpty { return selectedText }
-        guard let value, let range, range.length > 0, range.location <= value.utf16.count,
-              range.length <= value.utf16.count - range.location else { return nil }
-        return (value as NSString).substring(with: range)
+    var selectionPlan: AccessibilitySelectionPlan? {
+        AccessibilitySelectionPlan(document: value, range: range, selectedText: selectedText, selectedRanges: selectedRanges)
     }
+    func sameRawEvidence(as other: Self) -> Bool {
+        func equal(_ a: String?, _ b: String?) -> Bool {
+            switch (a, b) {
+            case (nil, nil): return true
+            case (let a?, let b?): return AccessibilitySelectionPlan.exactlyEqual(a, b)
+            default: return false
+            }
+        }
+        return range == other.range && selectedRanges == other.selectedRanges && equal(value, other.value) &&
+            equal(selectedText, other.selectedText) && subrole == other.subrole && role == other.role && description == other.description
+    }
+
 }
 
 struct AXEditorContext {
@@ -37,6 +50,7 @@ struct AXEditorContext {
     let snapshot: AXEditorSnapshot?
     let valueEditable: Bool
     let selectionSettable: Bool
+    var usesCanvasSelection: Bool { policy.isCanvasTextEditor(snapshot) }
 }
 
 /// External messages use a serial worker; own-process AX invokes AppKit and
@@ -57,6 +71,8 @@ final class AXClient {
         var geometrySupported: Bool?
     }
     private var capabilities = ExpiringCache<ElementKey, Capabilities>()
+    private struct DocumentExtent { let rawValue: String; let length: Int }
+    private var documentExtents = ExpiringCache<ElementKey, DocumentExtent>()
     private var manualAccessibility = ExpiringCache<String, Bool>(capacity: 16)
     private struct GeometryKey: Hashable { let element: ElementKey; let range: NSRange }
     private var missingGeometry = ExpiringCache<GeometryKey, Bool>()
@@ -79,8 +95,8 @@ final class AXClient {
         execution.submit { self.prepare(application) }
     }
 
-    func invalidate() { execution.submit { self.capabilities.removeAll(); self.manualAccessibility.removeAll() } }
-    func invalidateGeometry() { execution.submit { self.missingGeometry.removeAll() } }
+    func invalidate() { execution.submit { self.capabilities.removeAll(); self.manualAccessibility.removeAll(); self.documentExtents.removeAll() } }
+    func invalidateGeometry() { execution.submit { self.missingGeometry.removeAll(); self.documentExtents.removeAll() } }
 
     private func configured(_ element: AXUIElement) -> AXUIElement {
         // The timeout belongs to this AX object, not separately acquired equal
@@ -125,11 +141,10 @@ final class AXClient {
     func context(application: EditorApplication, focus: AXUIElement?, cancellation: AttemptCancellation) -> AXEditorContext? {
         prepare(application)
         let policy = EditorCompatibilityPolicy(application: application)
-        var focused = focus
-        if focused == nil {
-            let app = configured(AXUIElementCreateApplication(application.pid))
-            focused = element(attribute(app, kAXFocusedUIElementAttribute))
-        }
+        // Enabling an Electron accessibility tree can replace the focused AX
+        // object. Discover it again after prepare instead of using that mirror.
+        let app = configured(AXUIElementCreateApplication(application.pid))
+        let focused = element(attribute(app, kAXFocusedUIElementAttribute)) ?? focus
         var candidate = focused
         var snapshot: AXEditorSnapshot?
         for depth in 0..<6 {
@@ -150,7 +165,7 @@ final class AXClient {
                 var value = DarwinBoolean(false)
                 cached.valueEditable = AXUIElementIsAttributeSettable(candidate, kAXValueAttribute as CFString, &value) == .success && value.boolValue
             }
-            if cached.selectionSettable == nil, policy.canSetSelectionThroughAX {
+            if cached.selectionSettable == nil, policy.canSetSelectionThroughAX(snapshot) {
                 var value = DarwinBoolean(false)
                 cached.selectionSettable = AXUIElementIsAttributeSettable(candidate, kAXSelectedTextRangeAttribute as CFString, &value) == .success && value.boolValue
             }
@@ -164,58 +179,199 @@ final class AXClient {
     }
 
     func read(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool = true) -> AXEditorSnapshot? {
-        let names = [kAXSelectedTextRangeAttribute, kAXValueAttribute] + (includeContext ? [kAXSelectedTextAttribute, kAXSubroleAttribute, kAXParentAttribute,
-                                                                                     kAXRoleAttribute, kAXDescriptionAttribute] : [])
+        if case .snapshot(let snapshot) = readResult(editor, application: application, includeContext: includeContext) { return snapshot }
+        return nil
+    }
+
+    private func readRaw(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool) -> AXSnapshotRead {
+        let names = [kAXSelectedTextRangeAttribute, kAXValueAttribute, kAXSelectedTextAttribute, kAXSelectedTextRangesAttribute] +
+            (includeContext ? [kAXSubroleAttribute, kAXParentAttribute, kAXRoleAttribute, kAXDescriptionAttribute] : [])
         let key = ElementKey(session: application.session, element: editor)
         let now = ProcessInfo.processInfo.systemUptime
         var cached = capabilities.value(for: key, at: now) ?? Capabilities()
         var slots: [CFTypeRef?]
+        func individually() -> [CFTypeRef?]? {
+            var result: [CFTypeRef?] = []
+            for name in names {
+                var value: CFTypeRef?
+                let error = AXUIElementCopyAttributeValue(editor, name as CFString, &value)
+                if error == .cannotComplete { return nil }
+                if error == .success { result.append(value) }
+                else if AccessibilityValue.isAbsentAttributeError(error, attribute: name) { result.append(nil) }
+                else { return [] }
+            }
+            return result
+        }
         if cached.batch {
             var values: CFArray?
             let result = AXUIElementCopyMultipleAttributeValues(editor, names as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
             if result == .success, let values, CFArrayGetCount(values) == names.count {
-                slots = (values as [AnyObject]).map { AccessibilityValue.usable($0) }
-            } else if result == .notImplemented || result == .attributeUnsupported {
+                slots = (values as [AnyObject]).map { $0 }
+            } else if result == .cannotComplete { return .busy }
+            else if result == .notImplemented || result == .attributeUnsupported {
                 cached.batch = false
                 capabilities.insert(cached, for: key, at: now, lifetime: 3)
-                slots = names.map { attribute(editor, $0) }
-            } else { return nil }
-        } else { slots = names.map { attribute(editor, $0) } }
+                guard let values = individually() else { return .busy }
+                slots = values
+            } else { return .invalid }
+        } else {
+            guard let values = individually() else { return .busy }
+            slots = values
+        }
+        guard slots.count == names.count else { return .invalid }
+        if slots.contains(where: { AccessibilityValue.error($0) == .cannotComplete }) { return .busy }
+        for (index, slot) in slots.enumerated() {
+            if let error = AccessibilityValue.error(slot),
+               !AccessibilityValue.isAbsentAttributeError(error, attribute: names[index]) { return .invalid }
+        }
+        slots = slots.map(AccessibilityValue.usable)
         let range = AccessibilityValue.range(slots[0]).map { NSRange(location: $0.location, length: $0.length) }
-        return AXEditorSnapshot(range: range, value: slots[1] as? String,
-                                selectedText: includeContext ? slots[2] as? String : nil,
-                                subrole: includeContext ? slots[3] as? String : nil,
-                                parent: includeContext ? element(slots[4]) : nil,
-                                role: includeContext ? slots[5] as? String : nil,
-                                description: includeContext ? slots[6] as? String : nil)
+        let ranges = AccessibilityValue.ranges(slots[3]).map { $0.map { NSRange(location: $0.location, length: $0.length) } }
+        if slots[0] != nil, range == nil { return .invalid }
+        if slots[1] != nil, !(slots[1] is String) { return .invalid }
+        if slots[2] != nil, !(slots[2] is String) { return .invalid }
+        if slots[3] != nil, ranges == nil { return .invalid }
+        if includeContext {
+            for index in [4, 6, 7] where slots[index] != nil {
+                if !(slots[index] is String) { return .invalid }
+            }
+        }
+        return .snapshot(AXEditorSnapshot(range: range, value: slots[1] as? String, selectedText: slots[2] as? String,
+                                          selectedRanges: ranges, subrole: includeContext ? slots[4] as? String : nil,
+                                          parent: includeContext ? element(slots[5]) : nil, role: includeContext ? slots[6] as? String : nil,
+                                          description: includeContext ? slots[7] as? String : nil))
+    }
+
+    private func readResult(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool) -> AXSnapshotRead {
+        let includeContext = includeContext || application.bundleID == "com.figma.Desktop"
+        let initial = readRaw(editor, application: application, includeContext: includeContext)
+        guard case .snapshot(var snapshot) = initial else { return initial }
+        let policy = EditorCompatibilityPolicy(application: application)
+        guard policy.isCanvasTextEditor(snapshot), let rawValue = snapshot.value,
+              rawValue.contains("\n") || rawValue.contains("\u{2028}") else { return initial }
+        guard !snapshot.isSecure, !AccessibilitySelectionPlan.hasTextAttachment(rawValue),
+              snapshot.selectedText.map({ !AccessibilitySelectionPlan.hasTextAttachment($0) }) != false,
+              let range = snapshot.range, range.location <= rawValue.utf16.count,
+              range.length <= rawValue.utf16.count - range.location,
+              AccessibilitySelectionPlan.hasSingleRange(range, selectedRanges: snapshot.selectedRanges) else { return .invalid }
+        let expires = ProcessInfo.processInfo.systemUptime + ConversionTiming.canonicalDocumentBudget
+        let key = ElementKey(session: application.session, element: editor)
+        let cached = documentExtents.value(for: key, at: ProcessInfo.processInfo.systemUptime).flatMap {
+            AccessibilitySelectionPlan.exactlyEqual($0.rawValue, rawValue) ? $0.length : nil
+        }
+        var busy = false
+        let document = TextRangeDocumentPlan(upperBound: rawValue.utf16.count, lowerCandidate: range.location + range.length,
+                                              cachedLength: cached) { request in
+            guard ProcessInfo.processInfo.systemUptime < expires else { return .unavailable }
+            var request = CFRange(location: request.location, length: request.length)
+            guard let parameter = AXValueCreate(.cfRange, &request) else { return .unavailable }
+            var result: CFTypeRef?
+            let error = AXUIElementCopyParameterizedAttributeValue(editor, kAXStringForRangeParameterizedAttribute as CFString, parameter, &result)
+            if error == .cannotComplete { busy = true; return .unavailable }
+            guard ProcessInfo.processInfo.systemUptime < expires else { return .unavailable }
+            if error == .success, let value = result as? String { return .text(value) }
+            // Only this proven Figma text editor's explicit NoValue response
+            // means out of range. No generic nil/IPC error is a boundary.
+            if error == .noValue { return .outOfBounds }
+            return .unavailable
+        }
+        guard let document else { return busy ? .busy : .invalid }
+        let fresh = readRaw(editor, application: application, includeContext: true)
+        guard case .snapshot(let repeated) = fresh else { return fresh }
+        guard ProcessInfo.processInfo.systemUptime < expires, snapshot.sameRawEvidence(as: repeated) else { return .invalid }
+        if range.length > 0 {
+            guard AccessibilitySelectionPlan(document: document.document, range: range, selectedText: snapshot.selectedText,
+                                            selectedRanges: snapshot.selectedRanges) != nil else { return .invalid }
+        } else {
+            guard AccessibilitySelectionPlan.confirmsCaret(document: document.document, range: range, selectedText: snapshot.selectedText,
+                                                           selectedRanges: snapshot.selectedRanges, expectedDocument: document.document,
+                                                           expectedCaret: range) else { return .invalid }
+        }
+        documentExtents.insert(DocumentExtent(rawValue: rawValue, length: document.length), for: key,
+                               at: ProcessInfo.processInfo.systemUptime, lifetime: 30)
+        snapshot = repeated
+        snapshot = AXEditorSnapshot(range: snapshot.range, value: document.document, selectedText: snapshot.selectedText,
+                                    selectedRanges: snapshot.selectedRanges, subrole: snapshot.subrole, parent: snapshot.parent,
+                                    role: snapshot.role, description: snapshot.description, usesCanonicalText: true)
+        return .snapshot(snapshot)
+    }
+
+    /// Only an explicit busy snapshot response is retryable. Focus, secure
+    /// fields, policy changes and malformed data are immediate invalidations.
+    func acknowledgement(_ context: AXEditorContext) -> AXSnapshotRead {
+        guard focusMatches(context), let editor = context.element else { return .invalid }
+        let result = readResult(editor, application: context.application, includeContext: true)
+        guard case .snapshot(let snapshot) = result else { return result }
+        guard !snapshot.isSecure, context.policy.permitsEditing(snapshot),
+              context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return .invalid }
+        return result
     }
 
     func focusMatches(_ context: AXEditorContext) -> Bool {
-        if context.policy.allowsTransientFocus { return true }
         guard let current = target(fallbackPID: context.application.pid), current.pid == context.application.pid else { return false }
         if let original = context.focused { return current.focused.map { CFEqual($0, original) } ?? false }
-        return true
+        return false
     }
 
     func validate(_ context: AXEditorContext, document: String? = nil, range: NSRange? = nil, includeContext: Bool = false) -> AXEditorSnapshot? {
         guard focusMatches(context) else { return nil }
         guard let editor = context.element else { return document == nil && range == nil ? context.snapshot : nil }
         guard let snapshot = read(editor, application: context.application, includeContext: includeContext), !snapshot.isSecure else { return nil }
-        if let document, snapshot.value != document { return nil }
+        if let document, snapshot.value.map({ AccessibilitySelectionPlan.exactlyEqual($0, document) }) != true { return nil }
         if let range, snapshot.range != range { return nil }
         return snapshot
     }
 
-    func restoreSelection(_ context: AXEditorContext, document: String, range: NSRange,
+    func isEditable(_ context: AXEditorContext, snapshot: AXEditorSnapshot) -> Bool {
+        guard !snapshot.isSecure, context.policy.permitsEditing(snapshot),
+              let editor = context.element else { return false }
+        var editable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(editor, kAXValueAttribute as CFString, &editable) == .success && editable.boolValue
+    }
+
+    func replacementBackend(_ context: AXEditorContext, snapshot: AXEditorSnapshot, selected: Bool) -> TextReplacementBackend {
+        guard context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: selected,
+                                                selectedTextSettable: true) == .accessibilitySelectedText,
+              let editor = context.element else { return .unicodeEvents }
+        var settable = DarwinBoolean(false)
+        let supported = AXUIElementIsAttributeSettable(editor, kAXSelectedTextAttribute as CFString, &settable) == .success && settable.boolValue
+        return context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: selected,
+                                                 selectedTextSettable: supported)
+    }
+
+    /// One selected-fragment setter only. Never write AXValue/full-document
+    /// text, and never interpret its success reply as editor acknowledgement.
+    func replaceSelectedText(_ context: AXEditorContext, selection: AccessibilitySelectionPlan, replacement: String,
+                             cancellation: AttemptCancellation) -> Bool? {
+        guard !cancellation.isCancelled, TextReplacementBackend.acceptsNativeText(replacement),
+              let editor = context.element,
+              let snapshot = validate(context, document: selection.document, range: selection.range, includeContext: true),
+              isEditable(context, snapshot: snapshot),
+              selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
+                                selectedRanges: snapshot.selectedRanges),
+              replacementBackend(context, snapshot: snapshot, selected: true) == .accessibilitySelectedText,
+              !cancellation.isCancelled else { return false }
+        let result = AXUIElementSetAttributeValue(editor, kAXSelectedTextAttribute as CFString, replacement as CFString)
+        return !cancellation.isCancelled && result == .success
+    }
+
+    func restoreSelection(_ context: AXEditorContext, document: String, caret: NSRange, range: NSRange,
                           cancellation: AttemptCancellation) -> Bool? {
-        guard context.policy.canSetSelectionThroughAX, context.selectionSettable,
+        guard context.policy.canSetSelectionThroughAX(context.snapshot), context.selectionSettable,
               !cancellation.isCancelled, let editor = context.element,
-              validate(context, document: document) != nil, !cancellation.isCancelled else { return false }
+              let snapshot = validate(context, document: document, range: caret, includeContext: true),
+              isEditable(context, snapshot: snapshot),
+              context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection,
+              AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
+                                                       selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: caret),
+              !cancellation.isCancelled else { return false }
         var value = CFRange(location: range.location, length: range.length)
         guard let parameter = AXValueCreate(.cfRange, &value), !cancellation.isCancelled,
               AXUIElementSetAttributeValue(editor, kAXSelectedTextRangeAttribute as CFString, parameter) == .success else { return false }
         guard !cancellation.isCancelled else { return false }
-        return validate(context, document: document, range: range) != nil
+        // A target may apply the range after replying. The coordinator polls
+        // exact document/range/selected text within its separate fixed budget.
+        return true
     }
 
     func bounds(_ context: AXEditorContext, range: NSRange) -> CGRect? {

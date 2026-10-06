@@ -8,13 +8,6 @@ enum KeyboardEvents {
     private static var deliveryCompletion: ((Bool) -> Void)?
     private static var deliveryTimeout: DispatchWorkItem?
 
-    @discardableResult
-    static func command(_ key: CGKeyCode) -> Bool {
-        guard let events = sequence([(key, .maskCommand)]) else { return false }
-        post(events)
-        return true
-    }
-
     static func sequence(_ keys: [(CGKeyCode, CGEventFlags)]) -> [CGEvent]? {
         guard CGPreflightPostEventAccess(), let source = CGEventSource(stateID: .privateState) else { return nil }
         source.userData = marker
@@ -24,7 +17,7 @@ enum KeyboardEvents {
                   let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return nil }
             down.flags = flags
             // Leaving Command/Shift on key-up can leave Quartz's modifier/key
-            // state sticky after our Copy or selection arrows. Release only
+            // state sticky after selection shortcuts. Release only
             // the synthetic shortcut state; hardware guards remain separate.
             up.flags = []
             for event in [down, up] {
@@ -40,7 +33,7 @@ enum KeyboardEvents {
     }
 
     /// The final key-up receipt paces our batches through the system queue.
-    /// It does not prove Figma has handled them; actual Copy remains required.
+    /// It does not prove editor handling; fresh AX evidence is still required.
     static func postAndAwaitDelivery(_ events: [CGEvent], completion: @escaping (Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let last = events.last, last.type == .keyUp, let token = delivery.begin() else {

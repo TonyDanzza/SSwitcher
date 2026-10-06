@@ -42,27 +42,25 @@ final class UnicodeTextInputTests: XCTestCase {
         }
     }
 
-    func testDelayedEventsKeepReplacementAfterClipboardRestorationAndNewCopy() throws {
+    func testImmutableEventsIgnoreClipboardChangesAndKeepNewUserCopy() throws {
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
         pasteboard.setString("OLD clipboard", forType: .string)
-        let transaction = try XCTUnwrap(PasteboardTransaction(pasteboard: pasteboard))
-        XCTAssertTrue(transaction.write("initial Copy probe"))
-        pasteboard.clearContents()
-        pasteboard.setString("ghbdtn", forType: .string)
-        XCTAssertEqual(transaction.acceptCopyResult(), "ghbdtn")
-
+        let originalRevision = pasteboard.changeCount
         let input = try XCTUnwrap(UnicodeTextInput(text: "привет"))
         let delayedEvents = try XCTUnwrap(input.makeEvents())
-        XCTAssertTrue(transaction.write("verification Copy probe"))
-        XCTAssertEqual(try unicodeText(in: delayedEvents[0]), "привет")
-        transaction.restore()
+        XCTAssertEqual(pasteboard.changeCount, originalRevision)
         XCTAssertEqual(pasteboard.string(forType: .string), "OLD clipboard")
-        let serialized = try XCTUnwrap(CGEvent(withDataAllocator: nil, data: try XCTUnwrap(delayedEvents[0].data)))
-        XCTAssertEqual(try unicodeText(in: serialized), "привет")
+
+        // Another app may publish a new Copy before the target consumes an
+        // event. The immutable payload is independent of that shared state.
         pasteboard.clearContents()
         pasteboard.setString("new user copy", forType: .string)
+        let newRevision = pasteboard.changeCount
+        let serialized = try XCTUnwrap(CGEvent(withDataAllocator: nil, data: try XCTUnwrap(delayedEvents[0].data)))
+        XCTAssertEqual(try unicodeText(in: serialized), "привет")
         XCTAssertEqual(try unicodeText(in: delayedEvents[0]), "привет")
+        XCTAssertEqual(pasteboard.changeCount, newRevision)
         XCTAssertEqual(pasteboard.string(forType: .string), "new user copy")
     }
 
