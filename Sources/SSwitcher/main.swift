@@ -1,14 +1,19 @@
 import AppKit
+import SwitcherCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let monitor = KeyboardMonitor()
     private let editor = ConversionCoordinator()
     private let loginAtLaunch = LoginAtLaunch()
+    private let windowMoves = WindowMoveController()
+    private let windowHotKeys = WindowMoveHotKeys()
+    private var windowMovementEnabled = !UserDefaults.standard.bool(forKey: "windowMovementDisabled")
     private var enabled = !UserDefaults.standard.bool(forKey: "paused")
     private var lastAttempt = "Ещё не срабатывал"
     private var lastResult = "Ожидание двойного Shift"
     private var activationObserver: NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
     private var permissionTimer: Timer?
     private var permissionRetries = 0
     private var diagnosticsWindow: DiagnosticsWindow?
@@ -23,8 +28,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        windowHotKeys.onMove = { [weak self] direction in
+            guard let self else { return }
+            self.refreshWindowShortcuts()
+            guard self.windowHotKeys.isRegistered else { return }
+            self.monitor.focusChanged()
+            self.editor.overlay.cancel()
+            self.windowMoves.move(direction)
+        }
+        windowMoves.onResult = { [weak self] in
+            guard let self else { return }
+            self.statusItem.button?.toolTip = self.windowMoves.lastResult
+        }
+        screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshWindowShortcuts()
+            self?.rebuildMenu()
+        }
         monitor.onUserActivity = { [weak self] in self?.editor.overlay.cancel() }
         monitor.onRealInput = { [weak self] in self?.editor.userInputChanged() }
+        monitor.onWindowInteraction = { [weak self] in self?.windowMoves.userInteracted() }
         monitor.onGestureRelease = { [weak self] time in self?.editor.performance.gestureReleased(at: time) }
         monitor.onGestureCancelled = { [weak self] in self?.editor.performance.cancelGesture() }
         monitor.onBlockedGesture = { [weak self] in
@@ -32,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.lastResult = "Проверьте текст и выделите его заново: предыдущая замена не подтверждена"
             self.statusItem.button?.toolTip = self.lastResult
         }
-        monitor.canStartConversion = { [weak self] in self?.editor.isConverting == false }
+        monitor.canStartConversion = { [weak self] in self?.enabled == true && self?.editor.isConverting == false }
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled, !self.editor.isConverting, self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
@@ -64,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] notification in
             guard let self else { return }
             self.monitor.focusChanged()
+            self.windowMoves.cancel()
             self.editor.overlay.cancel()
             self.refreshPermissions()
             if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
@@ -82,9 +105,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Only retry while permissions/startup are missing, for at most 30 seconds.
     /// Menu/app activation/open are recovery points after that bounded window.
     private func refreshPermissions(startRetry: Bool = true) {
-        guard enabled else { permissionTimer?.invalidate(); permissionTimer = nil; return }
+        guard enabled || windowMovementEnabled else {
+            if monitor.isRunning { monitor.stop() }
+            refreshWindowShortcuts()
+            permissionTimer?.invalidate(); permissionTimer = nil
+            return
+        }
         if CGPreflightListenEventAccess() { if !monitor.isRunning { monitor.start() } }
         else if monitor.isRunning { monitor.stop() }
+        refreshWindowShortcuts()
         if monitor.isRunning && AXIsProcessTrusted() {
             permissionTimer?.invalidate(); permissionTimer = nil; permissionRetries = 0
         } else if startRetry && permissionTimer == nil {
@@ -96,6 +125,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if self.permissionRetries >= 15 { timer.invalidate(); self.permissionTimer = nil }
             }
             permissionTimer?.tolerance = 0.5
+        }
+    }
+
+    private func refreshWindowShortcuts() {
+        let frames = NSScreen.screens.map(\.frame).reduce(into: [CGRect]()) { unique, frame in
+            if !unique.contains(frame) { unique.append(frame) }
+        }
+        if windowMovementEnabled && AXIsProcessTrusted() && CGPreflightListenEventAccess() && monitor.isRunning && frames.count >= 2 {
+            windowHotKeys.start()
+        } else {
+            windowHotKeys.stop()
+            windowMoves.cancel()
         }
     }
 
@@ -116,11 +157,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ReplacementOverlay.enabled && !CGPreflightScreenCaptureAccess() {
             add("Разрешить запись экрана для анимации…", action: #selector(requestScreenCapture), to: menu)
         }
-        if !monitor.isRunning && enabled {
+        if !monitor.isRunning && (enabled || windowMovementEnabled) {
             add("Разрешить мониторинг ввода…", action: #selector(requestPermission), to: menu)
         }
         if !AXIsProcessTrusted() {
             add("Разрешить универсальный доступ…", action: #selector(requestAccessibility), to: menu)
+        }
+        menu.addItem(.separator())
+        let windowToggle = add("Переносить окно: ⌥⇧ + стрелки", action: #selector(toggleWindowMovement), to: menu)
+        windowToggle.state = windowMovementEnabled ? .on : .off
+        windowToggle.toolTip = "Выключите, чтобы Option+Shift+стрелки снова выделяли текст"
+        if windowMovementEnabled && !windowHotKeys.isRegistered {
+            if !AXIsProcessTrusted() { add("Для переноса нужен Универсальный доступ", to: menu) }
+            else if !CGPreflightListenEventAccess() { add("Для переноса нужен Мониторинг ввода", to: menu) }
+            else if !monitor.isRunning { add("Слежение за вводом не запущено", to: menu) }
+            else if NSScreen.screens.map(\.frame).reduce(into: [CGRect](), { if !$0.contains($1) { $0.append($1) } }).count < 2 { add("Перенос ждёт второго дисплея", to: menu) }
+            else if windowHotKeys.lastError != nil { add("Горячие клавиши переноса недоступны", to: menu) }
+            else { add("Перенос ждёт второго дисплея", to: menu) }
         }
         menu.addItem(.separator())
         let login = add("Запускать при входе в macOS", action: #selector(toggleLoginAtLaunch), to: menu)
@@ -147,7 +200,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleEnabled() {
         enabled.toggle()
         UserDefaults.standard.set(!enabled, forKey: "paused")
-        if enabled { refreshPermissions() } else { monitor.stop(); refreshPermissions() }
+        monitor.focusChanged()
+        refreshPermissions()
+        rebuildMenu()
+    }
+
+    @objc private func toggleWindowMovement() {
+        windowMovementEnabled.toggle()
+        UserDefaults.standard.set(!windowMovementEnabled, forKey: "windowMovementDisabled")
+        refreshPermissions()
         rebuildMenu()
     }
 
@@ -203,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     "Последняя попытка: \(self.lastAttempt)",
                     self.lastResult,
                     self.editor.diagnosticDetails,
+                    self.windowMoves.lastResult,
                     self.editor.overlay.lastStatus,
                     self.editor.performance.diagnosticStatus
                 ].joined(separator: "\n")
@@ -223,8 +285,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        windowHotKeys.stop()
+        windowMoves.cancel()
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         monitor.stop()
         editor.shutdown()
     }

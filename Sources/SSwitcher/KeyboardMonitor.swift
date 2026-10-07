@@ -5,6 +5,7 @@ final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
     var onUserActivity: (() -> Void)?
     var onRealInput: (() -> Void)?
+    var onWindowInteraction: (() -> Void)?
     var onGestureRelease: ((Double) -> Void)?
     var onGestureCancelled: (() -> Void)?
     var onBlockedGesture: (() -> Void)?
@@ -36,7 +37,7 @@ final class KeyboardMonitor {
 
     func claimConversion() -> Bool {
         if burst.state == .running { return true }
-        return burst.beginConversion()
+        return burst.beginConversion(allowed: canStartConversion?() != false)
     }
     func conversionFinished(unverified: Bool) {
         burst.complete(at: ProcessInfo.processInfo.systemUptime, unverified: unverified)
@@ -62,7 +63,8 @@ final class KeyboardMonitor {
     func start() -> Bool {
         if isRunning { return true }
         guard CGPreflightListenEventAccess() else { return false }
-        let types: [CGEventType] = [.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        let types: [CGEventType] = [.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                                    .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .scrollWheel]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
@@ -111,6 +113,7 @@ final class KeyboardMonitor {
             inputGeneration &+= 1
             onGestureCancelled?()
             onRealInput?()
+            onWindowInteraction?()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }
@@ -120,6 +123,18 @@ final class KeyboardMonitor {
             if type != .keyUp { syntheticEventCount += 1 }
             return
         }
+        let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let interaction: WindowShortcutInteraction
+        switch type {
+        case .keyDown: interaction = .keyDown
+        case .keyUp: interaction = .keyUp
+        case .flagsChanged: interaction = .modifierChanged
+        default: interaction = .pointer
+        }
+        if interaction.cancelsMove(key: key, option: event.flags.contains(.maskAlternate), shift: event.flags.contains(.maskShift),
+                                   command: event.flags.contains(.maskCommand), control: event.flags.contains(.maskControl)) {
+            onWindowInteraction?()
+        }
         // Real key-down already invalidates the attempt. Listening for key-up
         // is needed only for our delivery receipt, not a second input change.
         if type == .keyUp { return }
@@ -127,7 +142,6 @@ final class KeyboardMonitor {
         // The listening tap does only local bookkeeping/invalidation. AppKit
         // work is dispatched after the callback has returned to its run loop.
         DispatchQueue.main.async { [weak self] in self?.onUserActivity?() }
-        let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         // A second double Shift must not cancel selection restoration from the
         // first conversion. Actual typing, clicks and other modifiers still do.
         if type != .flagsChanged || (key != 56 && key != 60) {
@@ -155,7 +169,7 @@ final class KeyboardMonitor {
             if burst.state == .blocked {
                 DispatchQueue.main.async { [weak self] in self?.onBlockedGesture?() }
             }
-            if canStartConversion?() != false { burst.request() }
+            burst.request(allowed: canStartConversion?() != false)
         }
         guard burst.pending, !shiftDown else { return }
         lastGestureRelease = ProcessInfo.processInfo.systemUptime
@@ -163,9 +177,8 @@ final class KeyboardMonitor {
         let generation = inputGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.inputGeneration == generation,
-                  self.canStartConversion?() != false,
                   self.physicalModifiersClear, self.burst.consume(at: ProcessInfo.processInfo.systemUptime),
-                  self.burst.beginConversion() else { return }
+                  self.burst.beginConversion(allowed: self.canStartConversion?() != false) else { return }
             self.detector.reset()
             self.onDoubleShift?()
         }

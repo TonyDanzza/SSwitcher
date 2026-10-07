@@ -18,7 +18,8 @@ public struct ShiftBurstGate {
         lastChange = time
         if state == .draining { drainUntil = time + quietInterval }
     }
-    public mutating func request() {
+    public mutating func request(allowed: Bool = true) {
+        guard allowed else { return }
         if state == .idle || state == .pending { state = .pending }
     }
     public mutating func cancel() {
@@ -27,8 +28,8 @@ public struct ShiftBurstGate {
     public mutating func realInput() {
         if state == .running { inputDuringRun = true } else { state = .idle }
     }
-    public mutating func beginConversion() -> Bool {
-        guard state == .idle else { return false }
+    public mutating func beginConversion(allowed: Bool = true) -> Bool {
+        guard allowed, state == .idle else { return false }
         state = .running
         inputDuringRun = false
         return true

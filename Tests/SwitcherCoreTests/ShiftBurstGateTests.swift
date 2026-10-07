@@ -2,6 +2,23 @@ import XCTest
 @testable import SwitcherCore
 
 final class ShiftBurstGateTests: XCTestCase {
+    func testPausedConversionNeverClaimsRunningAndResumeAcceptsFreshGesture() {
+        var gate = ShiftBurstGate()
+        for time in [0.0, 0.2, 0.4] {
+            gate.shiftChanged(down: false, at: time)
+            gate.request(allowed: false)
+            XCTAssertFalse(gate.consume(at: time + 0.1))
+            XCTAssertFalse(gate.beginConversion(allowed: false))
+            XCTAssertEqual(gate.state, .idle)
+        }
+        gate.request()
+        gate.cancel() // Pausing also cancels a gesture which was pending before pause.
+        XCTAssertFalse(gate.consume(at: 1))
+        gate.shiftChanged(down: false, at: 2)
+        gate.request(allowed: true)
+        XCTAssertTrue(gate.consume(at: 2.1))
+        XCTAssertTrue(gate.beginConversion(allowed: true))
+    }
     func testStormProducesOnlyOneConversionAfterLastRelease() {
         var gate = ShiftBurstGate()
         for n in 0..<40 {
