@@ -15,9 +15,7 @@ struct EditorApplication {
         let bundle = application.bundleURL.flatMap(Bundle.init(url:))
         let version = bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
         session = "\(pid):\(application.launchDate?.timeIntervalSince1970 ?? 0):\(bundleID):\(version)"
-        isElectron = application.bundleURL.map {
-            FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path)
-        } ?? false
+        isElectron = ElectronApplicationBundle.recognizes(application.bundleURL)
     }
 }
 

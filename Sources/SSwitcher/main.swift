@@ -230,7 +230,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
+// Keep the lease alive globally; a refused second launch never constructs the
+// delegate, installs an observer, creates an icon or starts a keyboard tap.
+guard let instanceClaim = SingleInstance.claim() else { exit(EXIT_SUCCESS) }
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.run()
+withExtendedLifetime(instanceClaim) { app.run() }
