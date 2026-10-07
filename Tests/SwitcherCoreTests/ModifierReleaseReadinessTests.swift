@@ -2,7 +2,7 @@ import XCTest
 @testable import SwitcherCore
 
 final class ModifierReleaseReadinessTests: XCTestCase {
-    func testRapidSecondShiftWaitsThenRestoresWithoutQueuingMutation() {
+    func testRapidSecondShiftWaitsThenContinuesWithoutQueuingMutation() {
         var gate = ShiftBurstGate()
         var lifecycle = ConversionLifecycle()
         var modifiers = PhysicalModifierState()

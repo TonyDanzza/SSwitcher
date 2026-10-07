@@ -1,7 +1,6 @@
 import Foundation
 
-/// Accessibility offsets are UTF-16, while keyboard selection steps are
-/// grapheme clusters. A selection is usable only when every supplied piece of
+/// Accessibility offsets are UTF-16. A selection is usable only when every supplied piece of
 /// document evidence agrees; missing or stale data must never widen its scope.
 public struct AccessibilitySelectionPlan: Equatable {
     public let document: String
@@ -19,8 +18,6 @@ public struct AccessibilitySelectionPlan: Equatable {
         self.text = text
     }
 
-    public var isEntireDocument: Bool { range.location == 0 && range.length == document.utf16.count }
-
     /// A second snapshot immediately before mutation must describe the same
     /// document and range. In particular, repeated text cannot identify scope.
     public func matches(document: String?, range: NSRange?, selectedText: String?, selectedRanges: [NSRange]? = nil) -> Bool {
@@ -32,11 +29,10 @@ public struct AccessibilitySelectionPlan: Equatable {
         guard !replacement.isEmpty, !Self.hasTextAttachment(replacement) else { return nil }
         let result = (document as NSString).replacingCharacters(in: range, with: replacement)
         let resultRange = NSRange(location: range.location, length: replacement.utf16.count)
-        // A replacement may combine with a neighboring grapheme. In that case
-        // the exact fragment cannot be restored safely by character selection.
+        // Keep the replacement's scope and endpoint on whole grapheme
+        // boundaries, including when it combines with a neighboring character.
         guard Self.checkedRange(resultRange, in: result) != nil else { return nil }
-        return AccessibilityReplacementPlan(document: result, range: resultRange, text: replacement,
-                                             isEntireDocument: isEntireDocument)
+        return AccessibilityReplacementPlan(document: result, range: resultRange, text: replacement)
     }
 
     public static func hasTextAttachment(_ text: String) -> Bool { text.unicodeScalars.contains { $0.value == 0xFFFC } }
@@ -69,22 +65,20 @@ public struct AccessibilitySelectionPlan: Equatable {
     }
 }
 
-/// The exact document and range expected after a single replacement. Event
+/// The exact document and empty end caret expected after a single replacement. Event
 /// receipt and elapsed time are not text acknowledgement; AX evidence is.
 public struct AccessibilityReplacementPlan: Equatable {
     public let document: String
     public let range: NSRange
     public let text: String
-    public let isEntireDocument: Bool
     public var caret: NSRange { NSRange(location: range.location + range.length, length: 0) }
 
     public func documentMatches(_ candidate: String?) -> Bool {
         candidate.map { AccessibilitySelectionPlan.exactlyEqual(document, $0) } == true
     }
 
-    public func confirmsSelection(document: String?, range: NSRange?, selectedText: String?, selectedRanges: [NSRange]? = nil) -> Bool {
-        guard let candidate = AccessibilitySelectionPlan(document: document, range: range, selectedText: selectedText, selectedRanges: selectedRanges),
-              documentMatches(candidate.document), candidate.range == self.range else { return false }
-        return AccessibilitySelectionPlan.exactlyEqual(text, candidate.text)
+    public func confirmsCaret(document: String?, range: NSRange?, selectedText: String?, selectedRanges: [NSRange]? = nil) -> Bool {
+        AccessibilitySelectionPlan.confirmsCaret(document: document, range: range, selectedText: selectedText, selectedRanges: selectedRanges,
+                                                expectedDocument: self.document, expectedCaret: caret)
     }
 }

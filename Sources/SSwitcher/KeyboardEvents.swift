@@ -3,30 +3,9 @@ import Foundation
 import SwitcherCore
 
 enum KeyboardEvents {
-    static let marker = KeyboardEventDelivery.sourceMarker
     private static var delivery = KeyboardEventDelivery()
     private static var deliveryCompletion: ((Bool) -> Void)?
     private static var deliveryTimeout: DispatchWorkItem?
-
-    static func sequence(_ keys: [(CGKeyCode, CGEventFlags)]) -> [CGEvent]? {
-        guard CGPreflightPostEventAccess(), let source = CGEventSource(stateID: .privateState) else { return nil }
-        source.userData = marker
-        var events: [CGEvent] = []
-        for (key, flags) in keys {
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return nil }
-            down.flags = flags
-            // Leaving Command/Shift on key-up can leave Quartz's modifier/key
-            // state sticky after selection shortcuts. Release only
-            // the synthetic shortcut state; hardware guards remain separate.
-            up.flags = []
-            for event in [down, up] {
-                event.setIntegerValueField(.eventSourceUserData, value: marker)
-                events.append(event)
-            }
-        }
-        return events
-    }
 
     static func post(_ events: [CGEvent]) {
         for event in events { event.post(tap: .cghidEventTap) }
@@ -110,46 +89,4 @@ enum KeyboardEvents {
         postNext()
     }
 
-    /// Canvas selection has no truthful external atomic setter. Memory and
-    /// main-run-loop work are bounded per batch. A next batch is posted only
-    /// after the last key-up of this batch reaches the listening session tap.
-    static func restoreCanvasSelection(plan: CanvasSelectionPlan, valid: @escaping () -> Bool,
-                                       modifiersClear: @escaping () -> Bool, completion: @escaping (Bool) -> Void) {
-        if case .entireDocument = plan {
-            guard valid(), modifiersClear(), let events = sequence([(0, .maskCommand)]) else { completion(false); return }
-            postAndAwaitDelivery(events) { completion($0 && valid()) }
-            return
-        }
-        guard case .characters(let characterCount) = plan else { completion(false); return }
-        var modifierReadiness: ModifierReleaseReadiness?
-        func postBatch(_ remaining: Int) {
-            guard valid() else { completion(false); return }
-            let clear = modifiersClear()
-            if modifierReadiness != nil || !clear {
-                let now = ProcessInfo.processInfo.systemUptime
-                let wait = modifierReadiness ?? ModifierReleaseReadiness(start: now, timeout: ConversionTiming.modifierReleaseDeadline,
-                                                                        pollInterval: ConversionTiming.pollInterval)
-                modifierReadiness = wait
-                switch wait.decision(at: now, inputUnchanged: valid(), modifiersClear: clear) {
-                case .ready: break
-                case .wait(let delay):
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { postBatch(remaining) }
-                    return
-                case .cancelled, .timedOut: completion(false); return
-                }
-            }
-            modifierReadiness = nil
-            let count = min(remaining, 32)
-            guard count > 0 else { completion(true); return }
-            guard let events = sequence(Array(repeating: (CGKeyCode(123), CGEventFlags.maskShift), count: count)) else {
-                completion(false); return
-            }
-            postAndAwaitDelivery(events) { delivered in
-                guard delivered, valid() else { completion(false); return }
-                if remaining == count { completion(true) }
-                else { postBatch(remaining - count) }
-            }
-        }
-        postBatch(characterCount)
-    }
 }

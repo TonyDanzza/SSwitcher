@@ -1,4 +1,4 @@
-/// A second physical Shift may release at a selection boundary without
+/// A second physical Shift may release between text batches or before a caret correction without
 /// invalidating the running attempt. Waiting never authorizes changed input or
 /// extends its original deadline, and never queues another text mutation.
 public struct ModifierReleaseReadiness {

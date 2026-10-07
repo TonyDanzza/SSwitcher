@@ -155,7 +155,7 @@ final class ConversionCoordinator {
                 finish(attempt, outcome: .cancelled); return
             }
             selection = plan
-            attempt.deletingCharacters = word.selectionSteps
+            attempt.deletingCharacters = word.deletingCharacters
         }
         guard let conversion = InputSources.prepare(selection.text) else {
             finish(attempt, outcome: .failure("Добавьте английскую и русскую раскладки")); return
@@ -165,19 +165,18 @@ final class ConversionCoordinator {
             finish(attempt, outcome: .failure("Для этого слова выделите текст вручную")); return
         }
         guard let replacement = selection.replacing(with: conversion.text) else {
-            finish(attempt, outcome: .failure("Для этого фрагмента нельзя безопасно восстановить выделение")); return
+            finish(attempt, outcome: .failure("Для этого фрагмента нельзя безопасно определить конец замены")); return
         }
         attempt.converted = conversion
         attempt.replacement = replacement
-        attempt.canvasSelectionPlan = CanvasSelectionPlan(selection: selection, replacementText: conversion.text)
         diagnosticDetails = "\(attempt.selected ? "Выделение" : "Без выделения"): \(context.application.name)"
         prepareOverlay(attempt, range: selection.range, text: selection.text)
     }
 
     /// A second Shift gesture is drained, not queued as another replacement.
-    /// It may release before selection restoration; other input/focus changes
+    /// It may release before Spotlight's caret correction; other input/focus changes
     /// invalidate the attempt immediately. Polling never extends this budget.
-    private func awaitSelectionModifiers(_ attempt: ConversionAttempt,
+    private func awaitCaretModifiers(_ attempt: ConversionAttempt,
                                          readiness: ModifierReleaseReadiness? = nil, _ operation: @escaping () -> Void) {
         guard valid(attempt) else { finish(attempt, outcome: .unverified); return }
         let clear = attempt.modifiersClear()
@@ -188,10 +187,10 @@ final class ConversionCoordinator {
         switch wait.decision(at: now, inputUnchanged: valid(attempt), modifiersClear: clear) {
         case .ready: operation()
         case .wait(let delay):
-            schedule(attempt, delay: delay) { self.awaitSelectionModifiers(attempt, readiness: wait, operation) }
+            schedule(attempt, delay: delay) { self.awaitCaretModifiers(attempt, readiness: wait, operation) }
         case .cancelled: finish(attempt, outcome: .unverified)
         case .timedOut:
-            diagnosticDetails += "; Shift не отпущен для восстановления выделения"
+            diagnosticDetails += "; Shift не отпущен для возврата курсора"
             finish(attempt, outcome: .unverified)
         }
     }
@@ -220,9 +219,9 @@ final class ConversionCoordinator {
             guard let document = attempt.originalDocument, let range = attempt.originalRange,
                   let snapshot = client.validate(context, document: document, range: range, includeContext: true),
                   client.isEditable(context, snapshot: snapshot),
-                  context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return nil }
+                  context.policy.isCanvasTextEditor(snapshot) == context.isCanvasTextEditor else { return nil }
             if attempt.selected, context.spotlightFocus != nil,
-               !SpotlightSearchScope.canRestoreSelection(verifiedOverlay: true, nativeRangeSettable: client.hasNativeRangeSetter(context)) { return nil }
+               !SpotlightSearchScope.hasRequiredNativeRangeCapability(verifiedOverlay: true, nativeRangeSettable: client.hasNativeRangeSetter(context)) { return nil }
             let matches: Bool
             if let selection = attempt.selectionPlan {
                 matches = selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
@@ -299,7 +298,7 @@ final class ConversionCoordinator {
         guard delivered, valid(attempt) else { finish(attempt, outcome: .unverified); return }
         attempt.trace.begin(.confirmation)
         beginAcknowledgement(attempt)
-        awaitAcknowledgement(attempt, selection: false)
+        awaitAcknowledgement(attempt)
     }
 
     private func beginAcknowledgement(_ attempt: ConversionAttempt) {
@@ -308,14 +307,14 @@ final class ConversionCoordinator {
     }
 
     /// Event receipt only paces delivery. A fixed AX polling budget must prove
-    /// both the complete document and the exact resulting caret/selection.
-    private func awaitAcknowledgement(_ attempt: ConversionAttempt, selection: Bool) {
+    /// both the complete document and the exact empty caret at the edit's end.
+    private func awaitAcknowledgement(_ attempt: ConversionAttempt) {
         guard valid(attempt), let context = attempt.context, let replacement = attempt.replacement,
               var deadline = attempt.readiness else { finish(attempt, outcome: .unverified); return }
         let now = ProcessInfo.processInfo.systemUptime
         if deadline.expired(at: now) { finish(attempt, outcome: .unverified); return }
         guard deadline.shouldRead(at: now) else {
-            schedule(attempt, delay: deadline.delay(at: now)) { self.awaitAcknowledgement(attempt, selection: selection) }; return
+            schedule(attempt, delay: deadline.delay(at: now)) { self.awaitAcknowledgement(attempt) }; return
         }
         attempt.readiness = deadline
         read(attempt, operation: { $0.acknowledgement(context) }) { result in
@@ -326,23 +325,14 @@ final class ConversionCoordinator {
             switch result {
             case .snapshot(let value): snapshot = value
             case .busy:
-                self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt, selection: selection) }
+                self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt) }
                 return
             case .invalid, nil: self.finish(attempt, outcome: .unverified); return
             }
-            let acknowledged: Bool
-            if selection {
-                acknowledged = replacement.confirmsSelection(document: snapshot.value, range: snapshot.range,
-                                                              selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges)
-            } else {
-                acknowledged = AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range,
-                                                                         selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges,
-                                                                         expectedDocument: replacement.document, expectedCaret: replacement.caret)
-            }
-            if acknowledged {
-                if selection || !attempt.selected { self.confirmed(attempt) }
-                else { self.restoreSelection(attempt) }
-            } else if !selection, attempt.usesNativeSearchValue, !attempt.queryCaretRestored,
+            if replacement.confirmsCaret(document: snapshot.value, range: snapshot.range,
+                                          selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges) {
+                self.confirmed(attempt)
+            } else if !attempt.selected, attempt.usesNativeSearchValue, !attempt.queryCaretRestored,
                       replacement.documentMatches(snapshot.value) {
                 guard let caret = snapshot.range,
                       AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: caret,
@@ -351,70 +341,23 @@ final class ConversionCoordinator {
                     self.finish(attempt, outcome: .unverified); return
                 }
                 attempt.queryCaretRestored = true
-                self.awaitSelectionModifiers(attempt) {
+                self.awaitCaretModifiers(attempt) {
                     guard self.valid(attempt, mutation: true),
                           !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else {
                         self.finish(attempt, outcome: .unverified); return
                     }
                     self.read(attempt, operation: {
-                        $0.restoreSelection(context, document: replacement.document, caret: caret,
-                            range: replacement.caret, cancellation: attempt.cancellation)
+                        $0.restoreCaret(context, document: replacement.document, currentCaret: caret,
+                            expectedCaret: replacement.caret, deadline: deadline, cancellation: attempt.cancellation)
                     }) { restored in
                         guard restored == true else { self.finish(attempt, outcome: .unverified); return }
                         // Keep the original deadline: one caret correction
                         // cannot renew or retry document/caret verification.
-                        self.awaitAcknowledgement(attempt, selection: false)
+                        self.awaitAcknowledgement(attempt)
                     }
                 }
             } else {
-                self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt, selection: selection) }
-            }
-        }
-    }
-
-    private func restoreSelection(_ attempt: ConversionAttempt) {
-        awaitSelectionModifiers(attempt) { self.restoreSelectionWithModifiersReleased(attempt) }
-    }
-
-    private func restoreSelectionWithModifiersReleased(_ attempt: ConversionAttempt) {
-        guard valid(attempt, mutation: true), let context = attempt.context, let replacement = attempt.replacement else {
-            finish(attempt, outcome: .unverified); return
-        }
-        if context.selectionSettable, context.policy.canSetSelectionThroughAX(context.snapshot) {
-            // One range setter preserves native long-selection rendering. A
-            // success reply still requires fresh AX proof and is never retried.
-            read(attempt, operation: {
-                $0.restoreSelection(context, document: replacement.document, caret: replacement.caret,
-                                    range: replacement.range, cancellation: attempt.cancellation)
-            }) { restored in
-                guard restored == true else { self.finish(attempt, outcome: .unverified); return }
-                self.beginAcknowledgement(attempt)
-                self.awaitAcknowledgement(attempt, selection: true)
-            }
-        } else {
-            guard context.spotlightFocus == nil else { self.finish(attempt, outcome: .unverified); return }
-            // A physical Shift wait may outlive our first caret proof. Read it
-            // again before sending one keyboard restoration, never a retry.
-            read(attempt, operation: { client -> Bool? in
-                guard let snapshot = client.validate(context, document: replacement.document, range: replacement.caret, includeContext: true),
-                      client.isEditable(context, snapshot: snapshot),
-                      context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection else { return false }
-                return AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
-                                                                  selectedRanges: snapshot.selectedRanges, expectedDocument: replacement.document,
-                                                                  expectedCaret: replacement.caret)
-            }) { ready in
-                guard ready == true, self.valid(attempt, mutation: true) else { self.finish(attempt, outcome: .unverified); return }
-                let plan = context.usesCanvasSelection ? attempt.canvasSelectionPlan : .characters(replacement.text.count)
-                self.diagnosticDetails += plan == .entireDocument ? "; восстановление всего текста" : "; восстановление части текста"
-                KeyboardEvents.restoreCanvasSelection(plan: plan, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { restored in
-                    guard self.attempt === attempt else { return }
-                    guard restored else {
-                        self.diagnosticDetails += "; доставка выделения не подтверждена"
-                        self.finish(attempt, outcome: .unverified); return
-                    }
-                    self.beginAcknowledgement(attempt)
-                    self.awaitAcknowledgement(attempt, selection: true)
-                }
+                self.schedule(attempt, delay: ConversionTiming.pollInterval) { self.awaitAcknowledgement(attempt) }
             }
         }
     }
@@ -479,7 +422,6 @@ private final class ConversionAttempt {
     var selected = false
     var usesNativeSearchValue = false
     var queryCaretRestored = false
-    var canvasSelectionPlan = CanvasSelectionPlan.characters(0)
     var image: ImageOverlay?
     var readiness: ReadinessDeadline?
     var poll: DispatchWorkItem?

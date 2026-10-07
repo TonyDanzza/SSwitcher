@@ -65,7 +65,7 @@ final class TextReplacementBackendTests: XCTestCase {
         // indistinguishable from a pending/false success: neither is proof.
         XCTAssertFalse(AccessibilitySelectionPlan.confirmsCaret(document: original, range: replacement.caret, selectedText: "",
                                                                 expectedDocument: replacement.document, expectedCaret: replacement.caret))
-        XCTAssertFalse(replacement.confirmsSelection(document: original, range: selection.range, selectedText: selection.text))
+        XCTAssertFalse(replacement.confirmsCaret(document: original, range: selection.range, selectedText: selection.text))
         XCTAssertFalse(lifecycle.commitMutation())
         XCTAssertTrue(lifecycle.hasMutated)
         XCTAssertTrue(lifecycle.finish())

@@ -142,8 +142,8 @@ final class KeyboardMonitor {
         // The listening tap does only local bookkeeping/invalidation. AppKit
         // work is dispatched after the callback has returned to its run loop.
         DispatchQueue.main.async { [weak self] in self?.onUserActivity?() }
-        // A second double Shift must not cancel selection restoration from the
-        // first conversion. Actual typing, clicks and other modifiers still do.
+        // A second double Shift is drained during the existing replacement.
+        // Actual typing, clicks and other modifiers still cancel that attempt.
         if type != .flagsChanged || (key != 56 && key != 60) {
             inputGeneration &+= 1
             burst.realInput()

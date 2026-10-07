@@ -57,7 +57,7 @@ struct AXEditorContext {
     let valueEditable: Bool
     let selectionSettable: Bool
     let spotlightFocus: AXSpotlightFocus?
-    var usesCanvasSelection: Bool { policy.isCanvasTextEditor(snapshot) }
+    var isCanvasTextEditor: Bool { policy.isCanvasTextEditor(snapshot) }
 }
 
 /// External messages use a serial worker; own-process AX invokes AppKit and
@@ -362,7 +362,7 @@ final class AXClient {
         let result = readResult(editor, application: context.application, includeContext: true)
         guard case .snapshot(let snapshot) = result else { return result }
         guard !snapshot.isSecure, context.policy.permitsEditing(snapshot),
-              context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection,
+              context.policy.isCanvasTextEditor(snapshot) == context.isCanvasTextEditor,
               context.spotlightFocus == nil || SpotlightSearchScope.acceptsDocument(snapshot.value) else { return .invalid }
         return result
     }
@@ -445,24 +445,29 @@ final class AXClient {
         return !cancellation.isCancelled && result == .success
     }
 
-    func restoreSelection(_ context: AXEditorContext, document: String, caret: NSRange, range: NSRange,
-                          cancellation: AttemptCancellation) -> Bool? {
-        guard context.policy.canSetSelectionThroughAX(context.snapshot), context.selectionSettable,
+    /// Only the proven Spotlight word path can correct a relocated empty
+    /// caret. This never selects a fragment or clears an unexpected selection.
+    func restoreCaret(_ context: AXEditorContext, document: String, currentCaret: NSRange, expectedCaret: NSRange,
+                      deadline: ReadinessDeadline, cancellation: AttemptCancellation) -> Bool? {
+        guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime),
+              context.spotlightFocus != nil, currentCaret.length == 0, expectedCaret.length == 0,
+              AccessibilitySelectionPlan.checkedRange(expectedCaret, in: document) != nil,
+              context.policy.canSetSelectionThroughAX(context.snapshot), context.selectionSettable,
               !cancellation.isCancelled, let editor = context.element,
-              let snapshot = validate(context, document: document, range: caret, includeContext: true),
+              let snapshot = validate(context, document: document, range: currentCaret, includeContext: true),
               isEditable(context, snapshot: snapshot),
-              context.policy.isCanvasTextEditor(snapshot) == context.usesCanvasSelection,
+              context.policy.isCanvasTextEditor(snapshot) == context.isCanvasTextEditor,
               AccessibilitySelectionPlan.confirmsCaret(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
-                                                       selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: caret),
+                                                       selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: currentCaret),
               !cancellation.isCancelled else { return false }
-        var value = CFRange(location: range.location, length: range.length)
+        var value = CFRange(location: expectedCaret.location, length: 0)
         guard let parameter = AXValueCreate(.cfRange, &value),
-              context.spotlightFocus == nil || hasNativeRangeSetter(context),
-              context.spotlightFocus == nil || focusMatches(context), !cancellation.isCancelled,
+              hasNativeRangeSetter(context), focusMatches(context), !cancellation.isCancelled,
+              !deadline.expired(at: ProcessInfo.processInfo.systemUptime),
               AXUIElementSetAttributeValue(editor, kAXSelectedTextRangeAttribute as CFString, parameter) == .success else { return false }
         guard !cancellation.isCancelled else { return false }
         // A target may apply the range after replying. The coordinator polls
-        // exact document/range/selected text within its separate fixed budget.
+        // the exact document/empty caret within its original fixed budget.
         return true
     }
 

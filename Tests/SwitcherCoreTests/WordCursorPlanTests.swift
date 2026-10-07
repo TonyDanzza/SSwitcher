@@ -7,10 +7,7 @@ final class WordCursorPlanTests: XCTestCase {
         for caret in 3..<9 { XCTAssertNil(WordCursorPlan(value: text, caret: caret)) }
         let plan = try XCTUnwrap(WordCursorPlan(value: text, caret: 9))
         XCTAssertEqual(plan.text, "ghbdtn")
-        XCTAssertEqual(plan.stepsToEnd, 0)
-        XCTAssertEqual(plan.selectionSteps, 6)
-        XCTAssertEqual(plan.replacingText(with: "привет")?.stepsToEnd, 0)
-        XCTAssertNil(plan.replacingText(with: "short"))
+        XCTAssertEqual(plan.deletingCharacters, 6)
         XCTAssertNil(WordCursorPlan(value: text, caret: 10))
     }
 
@@ -21,7 +18,7 @@ final class WordCursorPlanTests: XCTestCase {
 
     func testUTF16PrefixDoesNotAffectDeletionCount() throws {
         let plan = try XCTUnwrap(WordCursorPlan(value: "😀 ghbdtn", caret: 9))
-        XCTAssertEqual(plan.selectionSteps, 6)
+        XCTAssertEqual(plan.deletingCharacters, 6)
         XCTAssertNil(WordCursorPlan(value: "e\u{301}word", caret: 6))
         XCTAssertNil(WordCursorPlan(value: "😀word", caret: 6))
     }

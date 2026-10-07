@@ -18,7 +18,7 @@ public enum SpotlightSearchScope {
         expectedPID > 0 && expectedPID == actualPID && sameField && sameWindow && verifiedIdentity
     }
 
-    public static func canRestoreSelection(verifiedOverlay: Bool, nativeRangeSettable: Bool) -> Bool {
+    public static func hasRequiredNativeRangeCapability(verifiedOverlay: Bool, nativeRangeSettable: Bool) -> Bool {
         !verifiedOverlay || nativeRangeSettable
     }
 

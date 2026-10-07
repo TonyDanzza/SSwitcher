@@ -67,10 +67,10 @@ final class SpotlightSearchScopeTests: XCTestCase {
         XCTAssertFalse(lifecycle.commitMutation())
     }
 
-    func testOverlaySelectionRequiresNativeRangeRestoration() {
-        XCTAssertTrue(SpotlightSearchScope.canRestoreSelection(verifiedOverlay: true, nativeRangeSettable: true))
-        XCTAssertFalse(SpotlightSearchScope.canRestoreSelection(verifiedOverlay: true, nativeRangeSettable: false))
-        XCTAssertTrue(SpotlightSearchScope.canRestoreSelection(verifiedOverlay: false, nativeRangeSettable: false))
+    func testOverlayRequiresNativeRangeCapabilityWhileOrdinaryEditorsRemainUnchanged() {
+        XCTAssertTrue(SpotlightSearchScope.hasRequiredNativeRangeCapability(verifiedOverlay: true, nativeRangeSettable: true))
+        XCTAssertFalse(SpotlightSearchScope.hasRequiredNativeRangeCapability(verifiedOverlay: true, nativeRangeSettable: false))
+        XCTAssertTrue(SpotlightSearchScope.hasRequiredNativeRangeCapability(verifiedOverlay: false, nativeRangeSettable: false))
     }
 
     func testNativeQueryPlanReplacesOnlyTheWordEndingAtTheCaret() throws {

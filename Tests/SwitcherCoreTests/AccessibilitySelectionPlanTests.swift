@@ -7,7 +7,7 @@ final class AccessibilitySelectionPlanTests: XCTestCase {
         let range = NSRange(location: 7, length: 6)
         let plan = AccessibilitySelectionPlan(document: document, range: range, selectedText: "ghbdtn")
         XCTAssertEqual(plan?.text, "ghbdtn")
-        XCTAssertFalse(plan?.isEntireDocument ?? true)
+        XCTAssertEqual(plan?.range, range)
         XCTAssertNil(AccessibilitySelectionPlan(document: nil, range: range, selectedText: "ghbdtn"))
         XCTAssertNil(AccessibilitySelectionPlan(document: document, range: nil, selectedText: "ghbdtn"))
         XCTAssertNil(AccessibilitySelectionPlan(document: document, range: NSRange(location: 7, length: 0), selectedText: "ghbdtn"))
@@ -60,17 +60,19 @@ final class AccessibilitySelectionPlanTests: XCTestCase {
         XCTAssertEqual(result.document, "prefix " + converted + " suffix")
         XCTAssertEqual(result.range, NSRange(location: 7, length: converted.utf16.count))
         XCTAssertEqual(result.caret, NSRange(location: 7 + converted.utf16.count, length: 0))
-        XCTAssertTrue(result.confirmsSelection(document: result.document, range: result.range, selectedText: converted))
-        XCTAssertFalse(result.confirmsSelection(document: result.document, range: result.caret, selectedText: ""))
-        XCTAssertFalse(result.confirmsSelection(document: result.document, range: NSRange(location: 0, length: result.document.utf16.count), selectedText: result.document))
+        XCTAssertTrue(result.confirmsCaret(document: result.document, range: result.caret, selectedText: ""))
+        XCTAssertFalse(result.confirmsCaret(document: result.document, range: result.range, selectedText: converted))
+        XCTAssertFalse(result.confirmsCaret(document: result.document, range: NSRange(location: 0, length: result.document.utf16.count), selectedText: result.document))
         XCTAssertFalse(result.documentMatches("changed " + result.document))
     }
 
-    func testEntireDocumentProofRequiresExactCompleteSelection() {
+    func testEntireDocumentReplacementRequiresAnEmptyCaretAtItsUTF16End() {
         let text = "ghbdtn\n🙂"
         let plan = AccessibilitySelectionPlan(document: text, range: NSRange(location: 0, length: text.utf16.count), selectedText: text)!
-        XCTAssertTrue(plan.isEntireDocument)
-        XCTAssertTrue(plan.replacing(with: "привет\n🙂")!.isEntireDocument)
+        let result = plan.replacing(with: "привет\n🙂")!
+        XCTAssertEqual(result.caret, NSRange(location: "привет\n🙂".utf16.count, length: 0))
+        XCTAssertTrue(result.confirmsCaret(document: result.document, range: result.caret, selectedText: nil))
+        XCTAssertFalse(result.confirmsCaret(document: result.document, range: result.range, selectedText: result.text))
     }
 
     func testReplacementCannotCreatePartialNeighborGraphemeSelection() {
