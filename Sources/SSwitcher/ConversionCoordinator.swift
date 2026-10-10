@@ -430,7 +430,7 @@ final class ConversionCoordinator {
         guard valid(attempt), let conversion = attempt.converted else { finish(attempt, outcome: .unverified); return }
         attempt.trace.end(.confirmation)
         attempt.trace.end(.total)
-        TISSelectInputSource(conversion.target)
+        InputSources.selectAfterConversion(conversion.target)
         if let image = attempt.image {
             attempt.trace.begin(.reveal)
             image.reveal { attempt.trace.end(.reveal) }

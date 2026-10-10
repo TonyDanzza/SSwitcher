@@ -38,16 +38,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Public refresh for this installed application's static NSServices;
         // the ready provider can receive calls immediately and rejects unarmed.
         NSUpdateDynamicServices()
+        _ = InputSources.sourceChanged()
         inputSourceObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
             let wasConverting = self.editor.isConverting
-            self.monitor.focusChanged()
+            let changed = InputSources.sourceChanged()
+            if changed { self.monitor.focusChanged() }
             // A confirmed legacy replacement selects its target layout before
             // revealing the image. Idle built-in-layout notices preserve that
             // reveal; an active attempt still cancels.
-            if wasConverting { self.editor.overlay.cancel() }
+            if changed && wasConverting { self.editor.overlay.cancel() }
             self.rebuildMenu()
         }
         windowHotKeys.onMove = { [weak self] direction in
@@ -114,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.monitor.conversionFinished(unverified: outcome == .unverified)
                     switch outcome {
                     case .submitted:
-                        if let target { _ = TISSelectInputSource(target) }
+                        if let target { InputSources.selectAfterConversion(target) }
                         self.lastResult = "Текст передан нативному редактору MAX"
                     case .unavailable: self.lastResult = self.nativeServiceDiagnostic.conversionStatus
                     case .cancelled: self.lastResult = "Замена отменена: ввод или активное окно изменились"

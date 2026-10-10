@@ -186,6 +186,8 @@ final class NativeServiceDiagnostic: NSObject {
         report["hasString"] = true
         report["matchesEnglishFixture"] = text.utf16.elementsEqual("ghbdtn".utf16)
         report["matchesRussianFixture"] = text.utf16.elementsEqual("привет".utf16)
+        report["matchesSpaceFixture"] = text.utf16.elementsEqual(" ".utf16)
+        report["matchesRussianWithSpaceFixture"] = text.utf16.elementsEqual("привет ".utf16)
         report["lastTokenMatchesEnglishFixture"] = NativeWordCandidatePlan(prefix: text)?.matches("ghbdtn") == true
         report["lastTokenMatchesRussianFixture"] = NativeWordCandidatePlan(prefix: text)?.matches("привет") == true
         // Bound accepted payload work without retaining/reporting its length.

@@ -1,14 +1,18 @@
-# Validation — 0.1.22 / build 150
+# Validation — 0.1.22 / build 151
 
 ## Automated checks
 
-On 10 October 2026, `swift test` ran **202 tests with zero failures**. `swift build -c release --product SSwitcher` completed successfully. The installed release was signed and its signature checked. GitHub Actions repeats tests and packages the app on macOS.
+On 11 October 2026, `swift test` ran **207 tests with zero failures**. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
+
+Build 151 records a successful input-source selection only after reading back the requested source ID. A delayed or duplicate notification of that same selection no longer resets the next gesture or clears burst protection. Tests cover a notice between the two Shift taps, real external source changes, failed selection and unavailable source identity. This addresses a cancellation race; it does not establish that this race caused every reported MAX failure.
 
 Core tests cover gesture admission, burst handling, UTF-16 ranges, coherent selection, conversion planning, delivery receipts, native Services packet validation and window geometry. Passing these checks does not establish compatibility with every editor.
 
 ## Observed MAX behavior
 
 Tests on the MacBook display confirmed word conversion at the end, reverse conversion, a word before a space with its neighbor preserved, manual selection, refusal inside a word with the original cursor restored, and typing afterward. Tests used an unsent draft; no messages were sent.
+
+These editor checks were performed on build 150. Build 151's editor regression checks are pending: the Mac locked before they could be completed.
 
 One final word conversion took 343 ms, including a 33 ms commit stage. These are individual measurements, not benchmark percentiles or compositor timings. Eight rapid Shift presses preserved text without copies or deletion, but some requests were refused; the next ordinary attempt worked.
 

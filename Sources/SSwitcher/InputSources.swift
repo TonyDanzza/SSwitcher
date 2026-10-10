@@ -3,6 +3,27 @@ import InputMethodSupport
 import SwitcherCore
 
 enum InputSources {
+    // Accessed on the AppKit main thread alongside conversion and notices.
+    private static var observation = InputSourceObservation(sourceID: currentID)
+
+    static var currentID: String? {
+        guard let current = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
+        return string(kTISPropertyInputSourceID, of: current)
+    }
+
+    static func sourceChanged() -> Bool { observation.observe(currentID) }
+
+    @discardableResult
+    static func selectAfterConversion(_ source: TISInputSource) -> OSStatus {
+        // Initialize the baseline before changing the source. An observer
+        // then reads current state instead of treating every notice as input.
+        _ = observation
+        let reply = TISSelectInputSource(source)
+        observation.confirmedSelection(requestedID: string(kTISPropertyInputSourceID, of: source),
+            actualID: currentID, succeeded: reply == noErr)
+        return reply
+    }
+
     struct Conversion {
         let text: String
         let target: TISInputSource
