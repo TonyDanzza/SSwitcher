@@ -529,7 +529,8 @@ final class NativeSelectionServiceProof {
         let callbackStartedAt = ProcessInfo.processInfo.systemUptime
         let callback = ReadinessDeadline(start: callbackStartedAt, timeout: 0.6)
         var report: [String: Any] = ["callCount": 1, "hasErrorPointer": true, "windowProvenAtArm": true,
-                                     "windowRevalidatedInCallback": false]
+                                     "windowRevalidatedInCallback": false,
+                                     "wordRequest": automatic?.word != nil]
         func ready() -> Bool {
             let secure = !IsSecureEventInputEnabled()
             let foreground = foregroundMatches(request.identity)
@@ -543,6 +544,12 @@ final class NativeSelectionServiceProof {
         func complete(_ stage: String) {
             guard generation == epoch else { return }
             report["callbackMilliseconds"] = max(0, (ProcessInfo.processInfo.systemUptime - callbackStartedAt) * 1000)
+            // The aggregate outcome is recorded again after dispatch returns.
+            // Preserve the callback refusal separately, without retaining text.
+            var callbackReport = report
+            callbackReport["stage"] = stage
+            callbackReport["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+            UserDefaults.standard.set(callbackReport, forKey: "NativeSelectionCallbackReport")
             finish(stage, report: report)
             if let automatic {
                 automatic.state.published(stage == "responsePublished")

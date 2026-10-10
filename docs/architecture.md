@@ -32,9 +32,9 @@ MAX does not expose its composer as a usable Accessibility text editor in the te
 - After the bounded requestor-return settle, select the word once and convert its actual packet in the same callback. Do not re-read a cached candidate and issue a second conversion action.
 - Publish one response after source, foreground, input-generation, secure-input and deadline checks. No remote AX call runs inside the synchronous Services callback.
 
-Navigation goes to the original MAX process and window. Service shortcut events enter the session/AppKit route. The app temporarily releases its own Option+Shift arrow registrations during this finite transaction because they otherwise consume Qt's word-selection command, then restores the user's current preference.
+Navigation and its dependent Service shortcut events use the same session/AppKit posting route, with native events bound to the original MAX window. A target-process receipt confirms delivery; it does not prove editor handling. Mixing process-directed arrows with session-directed Service shortcuts was removed because cross-route ordering was not established. The app temporarily releases its own Option+Shift arrow registrations during this finite transaction because they otherwise consume Qt's word-selection command, then restores the user's current preference.
 
-The Services path still selects text temporarily. Publication and native action acceptance are receipts, not verification of MAX's whole document. The remaining flash and selected-phrase → cursor-word regression are documented in [validation.md](validation.md). No screenshot mask or additional input source is used for MAX.
+The Services path still selects text temporarily. Publication and native action acceptance are receipts, not verification of MAX's whole document. Callback refusals are retained separately from the aggregate result, without retaining text. The remaining flash and the selected-phrase → cursor-word checks are documented in [validation.md](validation.md). No screenshot mask or additional input source is used for MAX.
 
 ## Cancellation and repeat handling
 

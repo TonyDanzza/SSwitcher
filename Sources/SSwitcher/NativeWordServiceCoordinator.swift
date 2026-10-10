@@ -80,7 +80,7 @@ final class NativeWordServiceCoordinator {
         armTimeout("MAX не предоставил слово для нативной замены")
         record("wordCommitIssued")
         KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false,
-            postingTap: .cgSessionEventTap, navigationToTarget: true) { [weak self] delivered in
+            postingTap: .cgSessionEventTap) { [weak self] delivered in
                 guard let self, self.live else { return }
                 self.commitState.pressed(delivered)
                 if !delivered { self.fail("Нативный вызов замены не доставлен MAX"); return }
@@ -135,12 +135,14 @@ final class NativeWordServiceCoordinator {
         }
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.perform(steps, then: then) }) else { return }
-        guard beforeKeys(),
-              let events = NativeServiceBarrierEvents.batch(steps, appendProbe: false, state: .privateState) else {
+        guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
+              let raw = NativeServiceBarrierEvents.batch(steps, appendProbe: false, state: .privateState),
+              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Замена отменена: исходное окно или клавиши недоступны"); return
         }
         armTimeout("MAX не подтвердил доставку навигации")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: true) { [weak self] delivered in
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false,
+            postingTap: .cgSessionEventTap) { [weak self] delivered in
             guard let self, self.live else { return }
             self.timeout?.cancel(); self.timeout = nil
             guard delivered else { self.fail("Навигация не доставлена MAX"); return }
@@ -166,7 +168,7 @@ final class NativeWordServiceCoordinator {
         let ticket = Packet(completion, noSelection: noSelection)
         packet = ticket
         armPacketTimeout(ticket)
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false, postingTap: .cgSessionEventTap, navigationToTarget: true) { [weak self] delivered in
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false, postingTap: .cgSessionEventTap) { [weak self] delivered in
             guard let self, self.live, self.packet === ticket else { return }
             guard delivered else { self.fail("Вызов службы не доставлен MAX"); return }
             ticket.state.delivery(true)

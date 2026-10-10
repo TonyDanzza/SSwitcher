@@ -14,7 +14,7 @@ enum KeyboardEvents {
     /// The final key-up receipt paces our batches through the system queue.
     /// It does not prove editor handling; fresh AX evidence is still required.
     static func postAndAwaitDelivery(_ events: [CGEvent], targetPID: pid_t? = nil, directToTarget: Bool = true,
-                                    postingTap: CGEventTapLocation = .cghidEventTap, navigationToTarget: Bool = false,
+                                    postingTap: CGEventTapLocation = .cghidEventTap,
                                     completion: @escaping (Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let last = events.last, last.type == .keyUp, last.flags.isEmpty,
@@ -49,10 +49,9 @@ enum KeyboardEvents {
         DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.eventDeliveryDeadline, execute: timeout)
         func post(_ event: CGEvent) {
             event.timestamp = DispatchTime.now().uptimeNanoseconds
-            // Qt consumes navigation on its native responder; Services key
-            // equivalents must still traverse the AppKit session routing.
-            let arrow = (123...126).contains(event.getIntegerValueField(.keyboardEventKeycode))
-            if let targetPID, directToTarget || (navigationToTarget && arrow) { event.postToPid(targetPID) }
+            // One batch uses one posting route. Splitting navigation and its
+            // dependent service key across routes can reorder their arrival.
+            if let targetPID, directToTarget { event.postToPid(targetPID) }
             else { event.post(tap: postingTap) }
         }
         for event in events { post(event) }
