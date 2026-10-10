@@ -1,5 +1,6 @@
 import ApplicationServices
 import AppKit
+import CoreGraphics
 import Foundation
 import os
 import SwitcherCore
@@ -14,6 +15,24 @@ final class AttemptCancellation {
 }
 
 enum AXSnapshotRead { case snapshot(AXEditorSnapshot), busy, invalid }
+
+enum AXTextScopeRead {
+    case notRequired, verified, mismatch, unavailable(AXError), busy, cancelled, timedOut
+    var permitsUse: Bool {
+        switch self { case .notRequired, .verified: return true; default: return false }
+    }
+    var diagnosticCode: String {
+        switch self {
+        case .notRequired: return "notRequired"
+        case .verified: return "verified"
+        case .mismatch: return "mismatch"
+        case .unavailable: return "unavailable"
+        case .busy: return "busy"
+        case .cancelled: return "cancelled"
+        case .timedOut: return "timedOut"
+        }
+    }
+}
 
 struct AXEditorSnapshot {
     let range: NSRange?
@@ -48,16 +67,135 @@ struct AXSpotlightFocus {
     let window: AXUIElement
 }
 
+/// Keep the existing capability reply; false does not prove a read-only UI.
+enum AXValueWriteCapability {
+    case settable, notSettable, unavailable(AXError)
+    var allowsWrite: Bool {
+        if case .settable = self { return true }
+        return false
+    }
+}
+
+struct AXQtFocusedWindow {
+    let window: AXUIElement
+    let cancellation: AttemptCancellation
+}
+
+struct AXFocusPreparationDiagnostic {
+    var stage = "notAttempted"
+    var error: AXError?
+}
+
+struct AXFocusReadDiagnostic {
+    let status: AccessibilityElementReply.Status
+    let error: AXError?
+    init(_ reply: AccessibilityElementReply) { status = reply.status; error = reply.error }
+}
+
+struct AXFocusDiscoveryDiagnostic {
+    var system: AXFocusReadDiagnostic?
+    var fallbackApplication: AXFocusReadDiagnostic?
+    var application: AXFocusReadDiagnostic?
+    var systemOwnerError: AXError?
+}
+
+struct AXElectronPreparationDiagnostic {
+    let stage: String
+    let error: AXError?
+    var rolePreparation = AXFocusPreparationDiagnostic()
+}
+
+struct AXEditorTarget {
+    let pid: pid_t
+    let focused: AXUIElement?
+    let spotlight: AXSpotlightFocus?
+    let focusDiscovery: AXFocusDiscoveryDiagnostic
+}
+
 struct AXEditorContext {
     let application: EditorApplication
     let policy: EditorCompatibilityPolicy
     let focused: AXUIElement?
     let element: AXUIElement?
     let snapshot: AXEditorSnapshot?
-    let valueEditable: Bool
+    let valueWriteCapability: AXValueWriteCapability?
     let selectionSettable: Bool
     let spotlightFocus: AXSpotlightFocus?
+    let qtFocusedWindow: AXQtFocusedWindow?
+    let initialFocusRoles: [String?]
+    let editorDiscoveryRoles: [String?]
+    let focusPreparation: AXFocusPreparationDiagnostic
+    let focusDiscovery: AXFocusDiscoveryDiagnostic
+    let electronPreparation: AXElectronPreparationDiagnostic
+    var valueEditable: Bool { valueWriteCapability?.allowsWrite == true }
     var isCanvasTextEditor: Bool { policy.isCanvasTextEditor(snapshot) }
+
+    /// Role identifiers are metadata, not arbitrary labels or field content.
+    private static func diagnosticRole(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let bytes = Array(raw.utf8.prefix(65))
+        guard bytes.count > 2, bytes.count <= 64, bytes[0] == 65, bytes[1] == 88,
+              bytes.allSatisfy({ $0 == 95 || (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) }) else { return nil }
+        return raw
+    }
+
+    /// The existing reply only; no text, ranges, labels, descriptions or PID.
+    func conversionDiagnostic() -> [String: Any] {
+        let role = snapshot?.role
+        var report: [String: Any] = [
+            "appBundleID": application.bundleID,
+            "role": Self.diagnosticRole(role) ?? (role == nil ? "absent" : "other"),
+            "initialFocusRoles": initialFocusRoles.map { Self.diagnosticRole($0) ?? ($0 == nil ? "absent" : "other") },
+            "editorDiscoveryRoles": editorDiscoveryRoles.map { Self.diagnosticRole($0) ?? ($0 == nil ? "absent" : "other") },
+            "focusPreparation": focusPreparation.stage
+        ]
+        for (key, read) in [("systemFocusRead", focusDiscovery.system),
+                            ("fallbackApplicationFocusRead", focusDiscovery.fallbackApplication),
+                            ("applicationFocusRead", focusDiscovery.application)] {
+            report[key] = read?.status.rawValue ?? "notAttempted"
+            if let error = read?.error { report[key + "AXError"] = Int(error.rawValue) }
+        }
+        if let error = focusDiscovery.systemOwnerError { report["systemFocusOwnerAXError"] = Int(error.rawValue) }
+        report["electronPackageRecognized"] = application.isElectron
+        report["electronPreparation"] = electronPreparation.stage
+        if let error = electronPreparation.error { report["electronPreparationAXError"] = Int(error.rawValue) }
+        report["electronRolePreparation"] = electronPreparation.rolePreparation.stage
+        if let error = electronPreparation.rolePreparation.error { report["electronRolePreparationAXError"] = Int(error.rawValue) }
+        if let error = focusPreparation.error { report["focusPreparationAXError"] = Int(error.rawValue) }
+        switch valueWriteCapability {
+        case .settable: report["valueCapability"] = "settable"
+        case .notSettable: report["valueCapability"] = "notSettable"
+        case .unavailable(let error):
+            report["valueCapability"] = "unavailable"
+            report["AXError"] = Int(error.rawValue)
+        case nil: report["valueCapability"] = "notQueried"
+        }
+        return report
+    }
+
+    func editingRefusal(for snapshot: AXEditorSnapshot) -> String {
+        guard snapshot.role != nil else { return "AXRole: редактор не предоставил тип поля" }
+        let role: String
+        switch snapshot.role {
+        case kAXTextAreaRole: role = "AXTextArea"
+        case kAXTextFieldRole: role = "AXTextField"
+        case kAXComboBoxRole: role = "AXComboBox"
+        case kAXGroupRole: return "AXGroup: поле не подтверждено как редактор"
+        case kAXStaticTextRole: return "AXStaticText: поле не подтверждено как редактор"
+        case kAXWindowRole: return "AXWindow: поле не подтверждено как редактор"
+        case kAXUnknownRole: return "AXUnknown: поле не подтверждено как редактор"
+        default:
+            if let identifier = Self.diagnosticRole(snapshot.role) { return "\(identifier): неподдерживаемый тип поля" }
+            return "Неподдерживаемая роль поля"
+        }
+        guard policy.permitsEditing(snapshot) else { return "\(role): режим редактирования не подтверждён" }
+        switch valueWriteCapability {
+        case .settable: return "\(role): поле не подтвердило редактирование"
+        case .notSettable: return "\(role): редактор не разрешает запись AXValue"
+        case .unavailable(let error): return "\(role): ошибка проверки AXValue (\(error.rawValue))"
+        case nil: return "\(role): диапазон для проверки AXValue недоступен"
+        }
+    }
 }
 
 /// External messages use a serial worker; own-process AX invokes AppKit and
@@ -73,16 +211,25 @@ final class AXClient {
     }
     private struct Capabilities {
         var batch = true
-        var valueEditable: Bool?
+        var valueWriteCapability: AXValueWriteCapability?
         var selectionSettable: Bool?
         var geometrySupported: Bool?
     }
     private var capabilities = ExpiringCache<ElementKey, Capabilities>()
     private struct DocumentExtent { let rawValue: String; let length: Int }
     private var documentExtents = ExpiringCache<ElementKey, DocumentExtent>()
-    private var manualAccessibility = ExpiringCache<String, Bool>(capacity: 16)
+    private struct ElectronPreparationResult {
+        let setterError: AXError
+        let queriedAt: Double
+        var rolePreparation = AXFocusPreparationDiagnostic()
+    }
+    private var manualAccessibility = ExpiringCache<String, ElectronPreparationResult>(capacity: 16)
     private struct GeometryKey: Hashable { let element: ElementKey; let range: NSRange }
     private var missingGeometry = ExpiringCache<GeometryKey, Bool>()
+    private struct QtDisplaySnapshot: Equatable {
+        let mainID: CGDirectDisplayID
+        let bounds: [CGDirectDisplayID: CGRect]
+    }
 
     init(policy: AccessibilityExecution.Policy) { execution = AccessibilityExecution(policy: policy) }
 
@@ -99,7 +246,7 @@ final class AXClient {
     }
 
     func prepareAccessibility(for application: EditorApplication) {
-        execution.submit { self.prepare(application) }
+        execution.submit { _ = self.prepare(application) }
     }
 
     func invalidate() { execution.submit { self.capabilities.removeAll(); self.manualAccessibility.removeAll(); self.documentExtents.removeAll() } }
@@ -123,17 +270,35 @@ final class AXClient {
         return configured(value as! AXUIElement)
     }
 
-    func target(fallbackPID: pid_t) -> (pid: pid_t, focused: AXUIElement?, spotlight: AXSpotlightFocus?)? {
+    /// Retain the result of this existing query without a second AX request.
+    private func focusedElement(_ node: AXUIElement) -> (element: AXUIElement?, diagnostic: AXFocusReadDiagnostic) {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(node, kAXFocusedUIElementAttribute as CFString, &value)
+        let reply = AccessibilityElementReply(error: error, value: value)
+        return (reply.element.map(configured), AXFocusReadDiagnostic(reply))
+    }
+
+    func target(fallbackPID: pid_t) -> AXEditorTarget? {
         let system = configured(AXUIElementCreateSystemWide())
-        if let focus = element(attribute(system, kAXFocusedUIElementAttribute)) {
+        let systemRead = focusedElement(system)
+        var diagnostic = AXFocusDiscoveryDiagnostic(system: systemRead.diagnostic)
+        if let focus = systemRead.element {
             var pid: pid_t = 0
-            if AXUIElementGetPid(focus, &pid) == .success { return (pid, focus, spotlightFocus(focus, pid: pid)) }
+            let error = AXUIElementGetPid(focus, &pid)
+            if error == .success {
+                return AXEditorTarget(pid: pid, focused: focus, spotlight: spotlightFocus(focus, pid: pid), focusDiscovery: diagnostic)
+            }
+            diagnostic.systemOwnerError = error
         }
         // Systemwide discovery is safe on the worker, but a fallback query to
         // our app's focused view would execute AppKit in-process on that worker.
-        if fallbackPID == ProcessInfo.processInfo.processIdentifier, execution.policy == .remoteApplication { return (fallbackPID, nil, nil) }
+        if fallbackPID == ProcessInfo.processInfo.processIdentifier, execution.policy == .remoteApplication {
+            return AXEditorTarget(pid: fallbackPID, focused: nil, spotlight: nil, focusDiscovery: diagnostic)
+        }
         let application = configured(AXUIElementCreateApplication(fallbackPID))
-        return (fallbackPID, element(attribute(application, kAXFocusedUIElementAttribute)), nil)
+        let fallback = focusedElement(application)
+        diagnostic.fallbackApplication = fallback.diagnostic
+        return AXEditorTarget(pid: fallbackPID, focused: fallback.element, spotlight: nil, focusDiscovery: diagnostic)
     }
 
     /// Narrow public UI evidence, not an app-name exception. Other Campo/Siri
@@ -181,60 +346,286 @@ final class AXClient {
                                                  sameWindow: CFEqual(original.window, proof.window), verifiedIdentity: true)
     }
 
-    private func prepare(_ application: EditorApplication) {
-        guard application.isElectron, AXIsProcessTrusted() else { return }
+    private func prepare(_ application: EditorApplication, cancellation: AttemptCancellation? = nil) -> AXElectronPreparationDiagnostic {
+        guard application.isElectron else { return AXElectronPreparationDiagnostic(stage: "notElectron", error: nil) }
+        guard AXIsProcessTrusted() else { return AXElectronPreparationDiagnostic(stage: "notTrusted", error: nil) }
         let now = ProcessInfo.processInfo.systemUptime
-        guard manualAccessibility.value(for: application.session, at: now) == nil else { return }
-        let app = configured(AXUIElementCreateApplication(application.pid))
-        let success = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success
-        manualAccessibility.insert(success, for: application.session, at: now, lifetime: success ? 60 : 3)
+        let expires = now + ConversionTiming.electronPreparationBudget
+        func ready() -> Bool { cancellation?.isCancelled != true && ProcessInfo.processInfo.systemUptime < expires }
+        func interruption() -> AXFocusPreparationDiagnostic {
+            AXFocusPreparationDiagnostic(stage: cancellation?.isCancelled == true ? "cancelled" : "timedOut")
+        }
+        var app: AXUIElement?
+        let cached = manualAccessibility.value(for: application.session, at: now)
+        var result: ElectronPreparationResult
+        if let cached { result = cached }
+        else {
+            guard ready() else { return AXElectronPreparationDiagnostic(stage: interruption().stage, error: nil) }
+            let node = configured(AXUIElementCreateApplication(application.pid))
+            app = node
+            guard ready() else { return AXElectronPreparationDiagnostic(stage: interruption().stage, error: nil) }
+            let error = AXUIElementSetAttributeValue(node, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            result = ElectronPreparationResult(setterError: error, queriedAt: now)
+            // Retain an unsupported setter even if cancellation prevents the
+            // role entry; it must not be sent again for every failed gesture.
+            if ready() || error == .attributeUnsupported {
+                manualAccessibility.insert(result, for: application.session, at: now, lifetime: error == .success ? 60 : 3)
+            }
+        }
+        var diagnostic = AXElectronPreparationDiagnostic(
+            stage: cached != nil ? (result.setterError == .success ? "cachedSetterSuccess" : "cachedSetterFailure")
+                                 : (result.setterError == .success ? "setterSuccess" : "setterFailure"),
+            error: result.setterError == .success ? nil : result.setterError,
+            rolePreparation: result.rolePreparation)
+        guard ready() else { diagnostic.rolePreparation = interruption(); return diagnostic }
+        guard result.setterError == .attributeUnsupported, result.rolePreparation.stage == "notAttempted" else { return diagnostic }
+
+        // Chromium/Electron's public application role getter can enable native
+        // accessibility. Its response is discarded as editor authority: only
+        // the ordinary fresh focused-element discovery may supply that field.
+        let node = app ?? configured(AXUIElementCreateApplication(application.pid))
+        guard ready() else { diagnostic.rolePreparation = interruption(); return diagnostic }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &value)
+        guard ready() else { diagnostic.rolePreparation = interruption(); return diagnostic }
+        let role: AXFocusPreparationDiagnostic
+        if AccessibilityValue.isApplicationRole(value, error: error) {
+            role = AXFocusPreparationDiagnostic(stage: "applicationRoleRead")
+        } else if error != .success {
+            role = AXFocusPreparationDiagnostic(stage: "failed", error: error)
+        } else if let embedded = AccessibilityValue.error(value) {
+            role = AXFocusPreparationDiagnostic(stage: "failed", error: embedded)
+        } else if let usable = AccessibilityValue.usable(value) {
+            role = AXFocusPreparationDiagnostic(stage: usable is String ? "unexpectedRole" : "malformed")
+        } else { role = AXFocusPreparationDiagnostic(stage: "absent") }
+        guard ready() else { diagnostic.rolePreparation = interruption(); return diagnostic }
+        result.rolePreparation = role
+        // Updating the role result cannot extend the original setter cache.
+        manualAccessibility.insert(result, for: application.session, at: result.queriedAt, lifetime: 3)
+        diagnostic.rolePreparation = role
+        return diagnostic
+    }
+
+    /// Qt activates its accessibility machinery at QNSView entry points.
+    /// Enter the app's public hit-test path within its focused window, discard
+    /// the reply, then accept only fresh app/global focus in that same window.
+    private func prepareQtFocus(_ application: EditorApplication, app: AXUIElement,
+                                cancellation: AttemptCancellation, diagnostic: inout AXFocusPreparationDiagnostic)
+        -> (focused: AXUIElement, window: AXQtFocusedWindow)? {
+        let expires = ProcessInfo.processInfo.systemUptime + ConversionTiming.qtFocusPreparationBudget
+        func ready() -> Bool {
+            if cancellation.isCancelled { diagnostic.stage = "cancelled"; return false }
+            if ProcessInfo.processInfo.systemUptime >= expires { diagnostic.stage = "timedOut"; return false }
+            return true
+        }
+        func read(_ node: AXUIElement, _ name: String, stage: String) -> CFTypeRef? {
+            guard ready() else { return nil }
+            diagnostic.stage = stage
+            let node = configured(node)
+            guard ready() else { return nil }
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(node, name as CFString, &value)
+            guard ready() else { return nil }
+            guard error == .success else { diagnostic.error = error; return nil }
+            return AccessibilityValue.usable(value)
+        }
+        func owned(_ node: AXUIElement) -> Bool {
+            guard ready() else { return false }
+            var pid: pid_t = 0
+            let error = AXUIElementGetPid(node, &pid)
+            guard ready() else { return false }
+            if error != .success { diagnostic.error = error; return false }
+            if pid != application.pid { diagnostic.stage = "ownerMismatch"; return false }
+            return true
+        }
+        func validRect(_ rect: CGRect) -> Bool {
+            rect.size.width > 0 && rect.size.height > 0 && WindowTransferPlan.valid(rect)
+        }
+        func frame(_ window: AXUIElement) -> CGRect? {
+            guard let rawPoint = read(window, kAXPositionAttribute, stage: "windowPositionUnavailable"),
+                  CFGetTypeID(rawPoint) == AXValueGetTypeID(), AXValueGetType(rawPoint as! AXValue) == .cgPoint else { return nil }
+            var point = CGPoint.zero
+            guard AXValueGetValue(rawPoint as! AXValue, .cgPoint, &point) else { return nil }
+            guard let rawSize = read(window, kAXSizeAttribute, stage: "windowSizeUnavailable"),
+                  CFGetTypeID(rawSize) == AXValueGetTypeID(), AXValueGetType(rawSize as! AXValue) == .cgSize else { return nil }
+            var size = CGSize.zero
+            guard AXValueGetValue(rawSize as! AXValue, .cgSize, &size) else { return nil }
+            let result = CGRect(origin: point, size: size)
+            guard validRect(result) else { diagnostic.stage = "windowGeometryInvalid"; return nil }
+            return result
+        }
+        func displays() -> QtDisplaySnapshot? {
+            guard ready() else { return nil }
+            diagnostic.stage = "displaysUnavailable"
+            var count: UInt32 = 0
+            let countError = CGGetActiveDisplayList(0, nil, &count)
+            guard ready(), countError == .success, count > 0, count <= 64 else { return nil }
+            var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+            var actual: UInt32 = 0
+            let listError = CGGetActiveDisplayList(count, &ids, &actual)
+            guard ready(), listError == .success, actual == count, Set(ids).count == ids.count else { return nil }
+            let mainID = CGMainDisplayID()
+            guard ready(), ids.contains(mainID) else { return nil }
+            var bounds: [CGDirectDisplayID: CGRect] = [:]
+            for id in ids {
+                guard ready() else { return nil }
+                let rect = CGDisplayBounds(id)
+                guard ready() else { return nil }
+                guard id != kCGNullDirectDisplay, validRect(rect) else {
+                    diagnostic.stage = "displayGeometryInvalid"; return nil
+                }
+                bounds[id] = rect
+            }
+            return QtDisplaySnapshot(mainID: mainID, bounds: bounds)
+        }
+        func preparationPoint(frame: CGRect, displays: QtDisplaySnapshot) -> CGPoint? {
+            guard ready() else { return nil }
+            diagnostic.stage = "pointUnavailable"
+            // Insets avoid frame/display edges; they do not identify a control
+            // or prove that another window does not cover this point.
+            let interior = frame.insetBy(dx: 32, dy: 32)
+            guard validRect(interior) else { return nil }
+            var region: CGRect?
+            var largestArea: CGFloat = 0
+            for id in displays.bounds.keys.sorted() {
+                guard let bounds = displays.bounds[id] else { return nil }
+                let viewport = bounds.insetBy(dx: 8, dy: 8)
+                guard validRect(viewport) else { continue }
+                let visible = interior.intersection(viewport)
+                guard validRect(visible) else { continue }
+                let area = visible.width * visible.height
+                if area.isFinite, area > largestArea { region = visible; largestArea = area }
+            }
+            guard let region else { return nil }
+            let x = Float(region.midX), y = Float(region.midY)
+            guard x.isFinite, y.isFinite else { return nil }
+            let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
+            guard point.x > region.minX, point.x < region.maxX,
+                  point.y > region.minY, point.y < region.maxY, ready() else { return nil }
+            return point
+        }
+        guard let window = element(read(app, kAXFocusedWindowAttribute, stage: "focusedWindowUnavailable")), owned(window),
+              read(window, kAXRoleAttribute, stage: "windowRoleUnavailable") as? String == kAXWindowRole,
+              ready() else { return nil }
+        guard let originalFrame = frame(window), let originalDisplays = displays(),
+              let point = preparationPoint(frame: originalFrame, displays: originalDisplays) else { return nil }
+        let system = configured(AXUIElementCreateSystemWide())
+        guard let before = element(read(system, kAXFocusedUIElementAttribute, stage: "globalFocusUnavailable")), owned(before),
+              let beforeWindow = element(read(app, kAXFocusedWindowAttribute, stage: "focusedWindowChanged")), owned(beforeWindow),
+              CFEqual(beforeWindow, window), ready() else { return nil }
+        diagnostic.stage = "pointEntryUnavailable"
+        let pointApplication = configured(app)
+        guard ready() else { return nil }
+        var hit: AXUIElement?
+        let error = AXUIElementCopyElementAtPosition(pointApplication, Float(point.x), Float(point.y), &hit)
+        let hasHit = hit != nil
+        hit = nil // Never read or select the object under the preparation point.
+        guard ready() else { return nil }
+        guard error == .success, hasHit else {
+            if error != .success { diagnostic.error = error }
+            return nil
+        }
+        guard let focused = element(read(app, kAXFocusedUIElementAttribute, stage: "appFocusUnavailable")), owned(focused) else { return nil }
+        guard !CFEqual(focused, app) else { diagnostic.stage = "applicationStillFocused"; return nil }
+        guard let currentWindow = element(read(app, kAXFocusedWindowAttribute, stage: "focusedWindowChanged")),
+              CFEqual(currentWindow, window) else { return nil }
+        guard let global = element(read(system, kAXFocusedUIElementAttribute, stage: "globalFocusUnavailable")), owned(global) else { return nil }
+        guard CFEqual(global, focused) else { diagnostic.stage = "globalFocusMismatch"; return nil }
+        guard !CFEqual(global, window) else { diagnostic.stage = "windowStillFocused"; return nil }
+        guard let role = read(global, kAXRoleAttribute, stage: "focusRoleUnavailable") as? String else { return nil }
+        guard role != kAXWindowRole else { diagnostic.stage = "windowStillFocused"; return nil }
+        guard let containingWindow = element(read(global, kAXWindowAttribute, stage: "focusWindowUnavailable")),
+              CFEqual(containingWindow, window), ready() else { return nil }
+        guard let currentFrame = frame(window) else { return nil }
+        guard currentFrame == originalFrame else { diagnostic.stage = "windowGeometryChanged"; return nil }
+        guard let currentDisplays = displays() else { return nil }
+        guard currentDisplays == originalDisplays else { diagnostic.stage = "displayTopologyChanged"; return nil }
+        guard ready() else { return nil }
+        diagnostic.stage = "prepared"
+        return (focused, AXQtFocusedWindow(window: window, cancellation: cancellation))
     }
 
     func context(application: EditorApplication, focus: AXUIElement?, spotlight: AXSpotlightFocus? = nil,
+                 focusDiscovery initialFocusDiscovery: AXFocusDiscoveryDiagnostic = AXFocusDiscoveryDiagnostic(),
                  cancellation: AttemptCancellation) -> AXEditorContext? {
-        prepare(application)
+        let electronPreparation = prepare(application, cancellation: cancellation)
+        guard !cancellation.isCancelled else { return nil }
         let policy = EditorCompatibilityPolicy(application: application)
         // Enabling an Electron accessibility tree can replace the focused AX
         // object. Discover it again after prepare instead of using that mirror.
         let app = configured(AXUIElementCreateApplication(application.pid))
         if let spotlight, !systemSpotlightMatches(spotlight, pid: application.pid) { return nil }
-        let focused = spotlight?.field ?? element(attribute(app, kAXFocusedUIElementAttribute)) ?? focus
-        var candidate = focused
-        var snapshot: AXEditorSnapshot?
-        for depth in 0..<6 {
-            guard !cancellation.isCancelled, let current = candidate else { break }
-            snapshot = read(current, application: application)
-            // Overlay authority belongs to this exact search field. Never
-            // substitute a parent/result-view document when its range is absent.
-            if spotlight != nil || snapshot?.isSecure == true || snapshot?.range != nil { break }
-            guard depth < 5, let parent = snapshot?.parent else { break }
-            candidate = parent
+        var focusDiscovery = initialFocusDiscovery
+        var focused: AXUIElement?
+        if let spotlight { focused = spotlight.field }
+        else {
+            let fresh = focusedElement(app)
+            focusDiscovery.application = fresh.diagnostic
+            focused = fresh.element ?? focus
+        }
+        func discover(_ start: AXUIElement?) -> (element: AXUIElement?, snapshot: AXEditorSnapshot?, roles: [String?]) {
+            var candidate = start
+            var snapshot: AXEditorSnapshot?
+            var roles: [String?] = []
+            for depth in 0..<6 {
+                guard !cancellation.isCancelled, let current = candidate else { break }
+                snapshot = read(current, application: application)
+                roles.append(snapshot?.role)
+                // The verified overlay remains authoritative at this field.
+                if spotlight != nil || snapshot?.isSecure == true || snapshot?.range != nil { break }
+                guard depth < 5, let parent = snapshot?.parent else { break }
+                candidate = parent
+            }
+            return (candidate, snapshot, roles)
+        }
+        var discovery = discover(focused)
+        let initialFocusRoles = discovery.roles
+        var focusPreparation = AXFocusPreparationDiagnostic()
+        var qtFocusedWindow: AXQtFocusedWindow?
+        if application.isQtQuick, !application.isElectron, spotlight == nil,
+           discovery.snapshot?.role == kAXApplicationRole,
+           discovery.snapshot?.range == nil, discovery.snapshot?.value == nil,
+           discovery.snapshot?.isSecure == false, !cancellation.isCancelled {
+            if let prepared = prepareQtFocus(application, app: app, cancellation: cancellation, diagnostic: &focusPreparation) {
+                focused = prepared.focused
+                qtFocusedWindow = prepared.window
+                discovery = discover(focused)
+            }
         }
         guard !cancellation.isCancelled else { return nil }
+        let candidate = discovery.element
+        let snapshot = discovery.snapshot
         if spotlight != nil, !SpotlightSearchScope.acceptsDocument(snapshot?.value) { return nil }
         var valueEditable = false
+        var valueWriteCapability: AXValueWriteCapability?
         var selectionSettable = false
         if let candidate, snapshot?.range != nil, snapshot?.isSecure != true {
             let key = ElementKey(session: application.session, element: candidate)
             let now = ProcessInfo.processInfo.systemUptime
             var cached = capabilities.value(for: key, at: now) ?? Capabilities()
             if spotlight != nil { cached.selectionSettable = nil }
-            if cached.valueEditable == nil {
+            if cached.valueWriteCapability == nil {
                 var value = DarwinBoolean(false)
-                cached.valueEditable = AXUIElementIsAttributeSettable(candidate, kAXValueAttribute as CFString, &value) == .success && value.boolValue
+                let error = AXUIElementIsAttributeSettable(candidate, kAXValueAttribute as CFString, &value)
+                cached.valueWriteCapability = error == .success ? (value.boolValue ? .settable : .notSettable) : .unavailable(error)
             }
             if cached.selectionSettable == nil, policy.canSetSelectionThroughAX(snapshot) {
                 var value = DarwinBoolean(false)
                 cached.selectionSettable = AXUIElementIsAttributeSettable(candidate, kAXSelectedTextRangeAttribute as CFString, &value) == .success && value.boolValue
             }
-            valueEditable = cached.valueEditable == true
+            valueWriteCapability = cached.valueWriteCapability
+            valueEditable = valueWriteCapability?.allowsWrite == true
             selectionSettable = cached.selectionSettable == true
             let fullySupported = cached.batch && cached.geometrySupported != false && (valueEditable || selectionSettable)
             capabilities.insert(cached, for: key, at: now, lifetime: fullySupported ? 30 : 3)
         }
         return AXEditorContext(application: application, policy: policy, focused: focused, element: candidate,
-                               snapshot: snapshot, valueEditable: valueEditable, selectionSettable: selectionSettable,
-                               spotlightFocus: spotlight)
+                               snapshot: snapshot, valueWriteCapability: valueWriteCapability,
+                               selectionSettable: selectionSettable,
+                               spotlightFocus: spotlight, qtFocusedWindow: qtFocusedWindow,
+                               initialFocusRoles: initialFocusRoles, editorDiscoveryRoles: discovery.roles,
+                               focusPreparation: focusPreparation, focusDiscovery: focusDiscovery,
+                               electronPreparation: electronPreparation)
     }
 
     func read(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool = true) -> AXEditorSnapshot? {
@@ -306,6 +697,12 @@ final class AXClient {
         let initial = readRaw(editor, application: application, includeContext: includeContext)
         guard case .snapshot(var snapshot) = initial else { return initial }
         let policy = EditorCompatibilityPolicy(application: application)
+        // Canvas object markers are not proven native attachment offsets.
+        // Keep that pre-existing exclusion even when a single-line canvas
+        // does not enter the canonical provider below.
+        if policy.isCanvasTextEditor(snapshot),
+           snapshot.value.map(AccessibilitySelectionPlan.hasTextAttachment) == true ||
+            snapshot.selectedText.map(AccessibilitySelectionPlan.hasTextAttachment) == true { return .invalid }
         guard policy.isCanvasTextEditor(snapshot), let rawValue = snapshot.value,
               rawValue.contains("\n") || rawValue.contains("\u{2028}") else { return initial }
         guard !snapshot.isSecure, !AccessibilitySelectionPlan.hasTextAttachment(rawValue),
@@ -357,21 +754,87 @@ final class AXClient {
 
     /// Only an explicit busy snapshot response is retryable. Focus, secure
     /// fields, policy changes and malformed data are immediate invalidations.
-    func acknowledgement(_ context: AXEditorContext) -> AXSnapshotRead {
+    func acknowledgement(_ context: AXEditorContext, replacement: AccessibilityReplacementPlan,
+                         cancellation: AttemptCancellation) -> AXSnapshotRead {
         guard focusMatches(context), let editor = context.element else { return .invalid }
         let result = readResult(editor, application: context.application, includeContext: true)
         guard case .snapshot(let snapshot) = result else { return result }
         guard !snapshot.isSecure, context.policy.permitsEditing(snapshot),
               context.policy.isCanvasTextEditor(snapshot) == context.isCanvasTextEditor,
               context.spotlightFocus == nil || SpotlightSearchScope.acceptsDocument(snapshot.value) else { return .invalid }
+        // Only an otherwise exact final document/caret can be acknowledged.
+        // In an attachment-bearing document, independently prove the replaced
+        // logical range; never adopt an expanded/normalized AXValue offset.
+        if replacement.confirmsCaret(document: snapshot.value, range: snapshot.range,
+                                      selectedText: snapshot.selectedText, selectedRanges: snapshot.selectedRanges) {
+            let proof = textScope(context, document: replacement.document, range: replacement.range,
+                                  cancellation: cancellation)
+            if case .busy = proof { return .busy }
+            guard proof.permitsUse else { return .invalid }
+        }
         return result
+    }
+
+    /// One public, read-only range query for an attachment-bearing document.
+    /// The reply is evidence for the already chosen range, never discovery or
+    /// an alternative source of document offsets.
+    func textScope(_ context: AXEditorContext, document: String, range: NSRange,
+                   cancellation: AttemptCancellation) -> AXTextScopeRead {
+        guard AccessibilitySelectionPlan.hasTextAttachment(document) else { return .notRequired }
+        let expires = ProcessInfo.processInfo.systemUptime + ConversionTiming.attachmentScopeBudget
+        func ready() -> AXTextScopeRead? {
+            if cancellation.isCancelled { return .cancelled }
+            if ProcessInfo.processInfo.systemUptime >= expires { return .timedOut }
+            return nil
+        }
+        if let stopped = ready() { return stopped }
+        guard let editor = context.element,
+              AccessibilitySelectionPlan.checkedRange(range, in: document) != nil else { return .mismatch }
+        var requested = CFRange(location: range.location, length: range.length)
+        guard let parameter = AXValueCreate(.cfRange, &requested) else { return .mismatch }
+        var value: CFTypeRef?
+        if let stopped = ready() { return stopped }
+        let error = AXUIElementCopyParameterizedAttributeValue(editor, kAXStringForRangeParameterizedAttribute as CFString,
+                                                              parameter, &value)
+        if let stopped = ready() { return stopped }
+        let failure = error != .success ? error : AccessibilityValue.error(value)
+        if failure == .cannotComplete { return .busy }
+        if let failure { return .unavailable(failure) }
+        return AccessibilitySelectionPlan.confirmsRangeText(AccessibilityValue.usable(value) as? String,
+                                                            document: document, range: range) ? .verified : .mismatch
     }
 
     func focusMatches(_ context: AXEditorContext) -> Bool {
         if let spotlight = context.spotlightFocus { return systemSpotlightMatches(spotlight, pid: context.application.pid) }
+        if let window = context.qtFocusedWindow { return qtFocusMatches(context, window: window) }
         guard let current = target(fallbackPID: context.application.pid), current.pid == context.application.pid else { return false }
         if let original = context.focused { return current.focused.map { CFEqual($0, original) } ?? false }
         return false
+    }
+
+    /// Recovery never makes an application/window mirror authoritative. Each
+    /// later phase requires the same live app/global field and original window.
+    private func qtFocusMatches(_ context: AXEditorContext, window: AXQtFocusedWindow) -> Bool {
+        let expires = ProcessInfo.processInfo.systemUptime + ConversionTiming.qtFocusProofBudget
+        func ready() -> Bool { !window.cancellation.isCancelled && ProcessInfo.processInfo.systemUptime < expires }
+        func read(_ node: AXUIElement, _ name: String) -> CFTypeRef? {
+            guard ready() else { return nil }
+            let node = configured(node)
+            guard ready() else { return nil }
+            let value = attribute(node, name)
+            return ready() ? value : nil
+        }
+        let system = configured(AXUIElementCreateSystemWide())
+        let app = configured(AXUIElementCreateApplication(context.application.pid))
+        guard let original = context.focused,
+              let focused = element(read(system, kAXFocusedUIElementAttribute)), CFEqual(focused, original), ready() else { return false }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(focused, &pid) == .success, pid == context.application.pid, ready(),
+              let appFocus = element(read(app, kAXFocusedUIElementAttribute)), CFEqual(appFocus, focused),
+              let currentWindow = element(read(app, kAXFocusedWindowAttribute)), CFEqual(currentWindow, window.window),
+              let containingWindow = element(read(focused, kAXWindowAttribute)), CFEqual(containingWindow, window.window),
+              ready() else { return false }
+        return true
     }
 
     func validate(_ context: AXEditorContext, document: String? = nil, range: NSRange? = nil, includeContext: Bool = false) -> AXEditorSnapshot? {
@@ -391,19 +854,22 @@ final class AXClient {
         return AXUIElementIsAttributeSettable(editor, kAXValueAttribute as CFString, &editable) == .success && editable.boolValue
     }
 
-    func replacementBackend(_ context: AXEditorContext, snapshot: AXEditorSnapshot, selected: Bool) -> TextReplacementBackend {
+    func replacementBackend(_ context: AXEditorContext, snapshot: AXEditorSnapshot, selected: Bool,
+                            replacementText: String? = nil) -> TextReplacementBackend {
         if !selected, context.spotlightFocus != nil {
             return context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: false,
                 selectedTextSettable: false, verifiedSpotlightSearch: true,
                 queryValueSettable: isEditable(context, snapshot: snapshot), queryRangeSettable: hasNativeRangeSetter(context))
         }
         guard context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: selected,
-                                                selectedTextSettable: true, verifiedSpotlightSearch: context.spotlightFocus != nil) == .accessibilitySelectedText,
+                                                selectedTextSettable: true, verifiedSpotlightSearch: context.spotlightFocus != nil,
+                                                replacementText: replacementText) == .accessibilitySelectedText,
               let editor = context.element else { return .unicodeEvents }
         var settable = DarwinBoolean(false)
         let supported = AXUIElementIsAttributeSettable(editor, kAXSelectedTextAttribute as CFString, &settable) == .success && settable.boolValue
         return context.policy.replacementBackend(for: context.application, snapshot: snapshot, selected: selected,
-                                                 selectedTextSettable: supported, verifiedSpotlightSearch: context.spotlightFocus != nil)
+                                                 selectedTextSettable: supported, verifiedSpotlightSearch: context.spotlightFocus != nil,
+                                                 replacementText: replacementText)
     }
 
     func hasNativeRangeSetter(_ context: AXEditorContext) -> Bool {
@@ -422,8 +888,9 @@ final class AXClient {
               isEditable(context, snapshot: snapshot),
               selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
                                 selectedRanges: snapshot.selectedRanges),
-              replacementBackend(context, snapshot: snapshot, selected: true) == .accessibilitySelectedText,
-              context.spotlightFocus == nil || focusMatches(context),
+              textScope(context, document: selection.document, range: selection.range, cancellation: cancellation).permitsUse,
+              replacementBackend(context, snapshot: snapshot, selected: true, replacementText: replacement) == .accessibilitySelectedText,
+              focusMatches(context),
               !cancellation.isCancelled else { return false }
         let result = AXUIElementSetAttributeValue(editor, kAXSelectedTextAttribute as CFString, replacement as CFString)
         return !cancellation.isCancelled && result == .success

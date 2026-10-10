@@ -18,8 +18,11 @@ final class ReplacementOverlay {
     private var pending: CaptureRequest?
     private var active: ImageOverlay?
     var canCapture: Bool {
+        canCapture(requiredMask: false)
+    }
+    private func canCapture(requiredMask: Bool) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard Self.enabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { lastStatus = "Анимация выключена"; return false }
+        guard requiredMask || (Self.enabled && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) else { lastStatus = "Анимация выключена"; return false }
         guard #available(macOS 15.2, *) else { lastStatus = "Анимация требует macOS 15.2"; return false }
         guard CGPreflightScreenCaptureAccess() else { lastStatus = "Для анимации разрешите запись экрана"; return false }
         return true
@@ -30,14 +33,14 @@ final class ReplacementOverlay {
         request?.finish(.cancelled)
         active?.close(); active = nil
     }
-    func prepare(bounds: CGRect?, valid: @escaping () -> Bool, completion: @escaping (PreparationResult<ImageOverlay>) -> Void) {
+    func prepare(bounds: CGRect?, padding: Bool = true, requiredMask: Bool = false, valid: @escaping () -> Bool, completion: @escaping (PreparationResult<ImageOverlay>) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         cancel()
-        guard canCapture else { completion(.skipped); return }
+        guard canCapture(requiredMask: requiredMask) else { completion(.skipped); return }
         guard #available(macOS 15.2, *), let bounds, let primary = NSScreen.screens.first else {
             lastStatus = "Редактор не предоставил точные границы слова"; completion(.skipped); return
         }
-        let padded = bounds.insetBy(dx: -max(10, bounds.width * 0.35), dy: -4).integral
+        let padded = padding ? bounds.insetBy(dx: -max(10, bounds.width * 0.35), dy: -4).integral : bounds.integral
         let frame = CGRect(x: padded.minX, y: primary.frame.maxY - padded.maxY, width: padded.width, height: padded.height)
         guard NSScreen.screens.contains(where: { $0.frame.contains(frame) }), valid() else {
             lastStatus = "Анимация пропущена: границы вне экрана"; completion(.skipped); return
@@ -48,11 +51,11 @@ final class ReplacementOverlay {
         let timeout = DispatchWorkItem { [weak self, weak request] in
             guard let self, let request, self.pending === request else { return }
             self.pending = nil
-            self.lastStatus = "Анимация пропущена: захват дольше 55 мс"
+            self.lastStatus = "Анимация пропущена: превышено время захвата"
             request.finish(.skipped)
         }
         request.timeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.captureBudget, execute: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (requiredMask ? 0.2 : ConversionTiming.captureBudget), execute: timeout)
         SCScreenshotManager.captureImage(in: padded) { [weak self, weak request] image, _ in
             DispatchQueue.main.async {
                 guard let self, let request, self.pending === request else { return }
@@ -105,16 +108,17 @@ final class ImageOverlay {
         view.setAccessibilityElement(false)
         panel.contentView = view
     }
-    func show() {
+    func show(watchdogDuration: Double = ConversionTiming.overlayWatchdog) {
         guard !closed else { return }
         panel.orderFrontRegardless()
         panel.displayIfNeeded()
         let watchdog = DispatchWorkItem { [weak self] in self?.close() }
         self.watchdog = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.overlayWatchdog, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDuration, execute: watchdog)
     }
     func reveal(completion: @escaping () -> Void) {
         guard !closed else { completion(); return }
+        guard ReplacementOverlay.enabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { close(); completion(); return }
         revealed = completion
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ConversionTiming.revealDuration

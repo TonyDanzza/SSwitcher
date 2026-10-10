@@ -1,4 +1,6 @@
 import AppKit
+import Carbon
+import InputMethodSupport
 import SwitcherCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -8,15 +10,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let loginAtLaunch = LoginAtLaunch()
     private let windowMoves = WindowMoveController()
     private let windowHotKeys = WindowMoveHotKeys()
+    private let maxFocusDiagnostic = MaxFocusDiagnostic()
+    private let nativeServiceDiagnostic = NativeServiceDiagnostic()
     private var windowMovementEnabled = !UserDefaults.standard.bool(forKey: "windowMovementDisabled")
     private var enabled = !UserDefaults.standard.bool(forKey: "paused")
     private var lastAttempt = "Ещё не срабатывал"
     private var lastResult = "Ожидание двойного Shift"
     private var activationObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
+    private var inputSourceObserver: NSObjectProtocol?
     private var permissionTimer: Timer?
     private var permissionRetries = 0
     private var diagnosticsWindow: DiagnosticsWindow?
+    private var maxWordDiagnosticTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -28,6 +34,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        NSApp.servicesProvider = nativeServiceDiagnostic
+        // Public refresh for this installed application's static NSServices;
+        // the ready provider can receive calls immediately and rejects unarmed.
+        NSUpdateDynamicServices()
+        inputSourceObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let wasConverting = self.editor.isConverting
+            self.monitor.focusChanged()
+            // A confirmed legacy replacement selects its target layout before
+            // revealing the image. Idle built-in-layout notices preserve that
+            // reveal; an active attempt still cancels.
+            if wasConverting { self.editor.overlay.cancel() }
+            self.rebuildMenu()
+        }
         windowHotKeys.onMove = { [weak self] direction in
             guard let self else { return }
             self.refreshWindowShortcuts()
@@ -45,7 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.rebuildMenu()
         }
         monitor.onUserActivity = { [weak self] in self?.editor.overlay.cancel() }
-        monitor.onRealInput = { [weak self] in self?.editor.userInputChanged() }
+        monitor.onRealInput = { [weak self] in
+            self?.editor.userInputChanged()
+            self?.nativeServiceDiagnostic.cancelConversion()
+        }
         monitor.onWindowInteraction = { [weak self] in self?.windowMoves.userInteracted() }
         monitor.onGestureRelease = { [weak self] time in self?.editor.performance.gestureReleased(at: time) }
         monitor.onGestureCancelled = { [weak self] in self?.editor.performance.cancelGesture() }
@@ -54,13 +79,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.lastResult = "Проверьте текст и выделите его заново: предыдущая замена не подтверждена"
             self.statusItem.button?.toolTip = self.lastResult
         }
-        monitor.canStartConversion = { [weak self] in self?.enabled == true && self?.editor.isConverting == false }
+        monitor.canStartConversion = { [weak self] in
+            self?.enabled == true && self?.editor.isConverting == false && self?.nativeServiceDiagnostic.isConverting == false
+        }
         monitor.onDoubleShift = { [weak self] in
-            guard let self, self.enabled, !self.editor.isConverting, self.monitor.claimConversion() else { return }
+            guard let self, self.enabled, !self.editor.isConverting, !self.nativeServiceDiagnostic.isConverting,
+                  self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+            // Keep a leftover experimental source from running beside legacy
+            // replacement. The utility no longer starts or requests the IME.
+            if InputMethodIdentity.currentMode != nil {
+                self.lastResult = "Экспериментальный источник отключён; выберите обычную раскладку macOS"
+                self.editor.performance.cancelGesture()
+                self.monitor.conversionFinished(unverified: false)
+                self.statusItem.button?.toolTip = self.lastResult
+                return
+            }
             self.lastResult = "Проверяю поле ввода…"
             let generation = self.monitor.inputGeneration
             let activity = self.monitor.activityGeneration
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop" {
+                self.editor.performance.cancelGesture()
+                // Option-Shift-Left is also Qt's word-selection command.
+                // Exclusive Carbon registrations consume it even when their
+                // callback declines the move. Release them for this finite
+                // transaction, then restore the user's current preference.
+                self.windowHotKeys.stop()
+                self.windowMoves.cancel()
+                self.nativeServiceDiagnostic.convertAtCursor(valid: { [weak self] in
+                    self?.monitor.inputGeneration == generation
+                }) { [weak self] outcome, target in
+                    guard let self else { return }
+                    self.refreshWindowShortcuts()
+                    self.monitor.conversionFinished(unverified: outcome == .unverified)
+                    switch outcome {
+                    case .submitted:
+                        if let target { _ = TISSelectInputSource(target) }
+                        self.lastResult = "Текст передан нативному редактору MAX"
+                    case .unavailable: self.lastResult = self.nativeServiceDiagnostic.conversionStatus
+                    case .cancelled: self.lastResult = "Замена отменена: ввод или активное окно изменились"
+                    case .unverified: self.lastResult = "Результат замены MAX не подтверждён; проверьте текст"
+                    }
+                    self.statusItem.button?.toolTip = self.lastResult
+                }
+                return
+            }
             self.editor.convertAtCursor(releaseTime: self.monitor.lastGestureRelease, isInputUnchanged: { [weak self] in
                 self?.monitor.inputGeneration == generation
             }, isActivityUnchanged: { [weak self] in self?.monitor.activityGeneration == activity },
@@ -89,14 +152,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.windowMoves.cancel()
             self.editor.overlay.cancel()
             self.refreshPermissions()
-            if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            if InputMethodIdentity.currentMode == nil, let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
                 self.editor.prepareAccessibility(for: app)
             }
         }
-        if let app = NSWorkspace.shared.frontmostApplication { editor.prepareAccessibility(for: app) }
+        if InputMethodIdentity.currentMode == nil, let app = NSWorkspace.shared.frontmostApplication { editor.prepareAccessibility(for: app) }
         refreshPermissions()
         rebuildMenu()
-        if CommandLine.arguments.contains("--check") { showDiagnostics() }
+        if CommandLine.arguments.contains("--check") { presentDiagnostics(activateApplication: false) }
+        if CommandLine.arguments.contains("--check-max-word-once") { armMaxWordDiagnostic() }
+        if CommandLine.arguments.contains("--inspect-max-arrow-once") { NativeKeyboardEventProbe.start() }
+    }
+
+    /// Explicit test entry without an owned text window or focus changes from
+    /// UI automation. One attempt on the built-in display; never at normal launch.
+    private func armMaxWordDiagnostic() {
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                self.maxWordDiagnosticTimer?.invalidate(); self.maxWordDiagnosticTimer = nil; return
+            }
+            guard !NSApp.isActive, NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop" else { return }
+            self.maxWordDiagnosticTimer?.invalidate(); self.maxWordDiagnosticTimer = nil
+            self.nativeServiceDiagnostic.withWordScopeForDiagnostics { self.monitor.triggerForDiagnostics() }
+        }
+        maxWordDiagnosticTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { refreshPermissions() }
@@ -132,7 +214,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let frames = NSScreen.screens.map(\.frame).reduce(into: [CGRect]()) { unique, frame in
             if !unique.contains(frame) { unique.append(frame) }
         }
-        if windowMovementEnabled && AXIsProcessTrusted() && CGPreflightListenEventAccess() && monitor.isRunning && frames.count >= 2 {
+        if windowMovementEnabled && !nativeServiceDiagnostic.isConverting && AXIsProcessTrusted() &&
+            CGPreflightListenEventAccess() && monitor.isRunning && frames.count >= 2 {
             windowHotKeys.start()
         } else {
             windowHotKeys.stop()
@@ -147,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Раскладка: \(InputSources.currentName)", to: menu)
         add(enabled ? (monitor.isRunning && AXIsProcessTrusted() ? "Двойной Shift включён" : "Нужны разрешения macOS") : "На паузе", to: menu)
         menu.addItem(.separator())
-        add("Двойной Shift: слово или выделенный текст", to: menu)
+        add("Двойной Shift: выделение или слово при курсоре в его конце", to: menu)
         add("Последний двойной Shift: \(lastAttempt)", to: menu)
         add(lastResult, to: menu)
         let toggle = add("Исправлять по двойному Shift", action: #selector(toggleEnabled), to: menu)
@@ -249,6 +332,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openLoginSettings() { loginAtLaunch.openSettings() }
 
     @objc private func showDiagnostics() {
+        presentDiagnostics(activateApplication: true)
+    }
+
+    private func presentDiagnostics(activateApplication: Bool) {
         refreshPermissions()
         if diagnosticsWindow == nil {
             diagnosticsWindow = DiagnosticsWindow(readStatus: { [weak self] in
@@ -266,12 +353,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.editor.diagnosticDetails,
                     self.windowMoves.lastResult,
                     self.editor.overlay.lastStatus,
-                    self.editor.performance.diagnosticStatus
+                    self.editor.performance.diagnosticStatus,
+                    self.maxFocusDiagnostic.status,
+                    self.nativeServiceDiagnostic.status,
+                    self.nativeServiceDiagnostic.conversionStatus
                 ].joined(separator: "\n")
             }, runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() },
-               requestCapture: { [weak self] in self?.requestScreenCapture() })
+               runMaxCheck: { [weak self] in
+                   guard let self else { return }
+                   self.nativeServiceDiagnostic.withWordScopeForDiagnostics { self.monitor.triggerForDiagnostics() }
+               },
+               requestCapture: { [weak self] in self?.requestScreenCapture() },
+               checkMaxFocus: { [weak self] in self?.maxFocusDiagnostic.start() },
+               cancelMaxFocus: { [weak self] in self?.maxFocusDiagnostic.cancel() },
+               checkMaxService: { [weak self] in self?.nativeServiceDiagnostic.arm() },
+               convertMaxSelection: { [weak self] in self?.nativeServiceDiagnostic.armConversion() },
+               cancelMaxService: { [weak self] in self?.nativeServiceDiagnostic.cancel() })
         }
-        diagnosticsWindow?.present()
+        diagnosticsWindow?.present(activateApplication: activateApplication)
     }
 
     @objc private func requestAccessibility() {
@@ -285,11 +384,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        maxWordDiagnosticTimer?.invalidate(); maxWordDiagnosticTimer = nil
+        maxFocusDiagnostic.cancel()
+        nativeServiceDiagnostic.cancel()
+        NSApp.servicesProvider = nil
         windowHotKeys.stop()
         windowMoves.cancel()
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        if let inputSourceObserver { DistributedNotificationCenter.default().removeObserver(inputSourceObserver) }
         monitor.stop()
         editor.shutdown()
     }

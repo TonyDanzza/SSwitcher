@@ -97,9 +97,12 @@ final class TextRangeDocumentPlanTests: XCTestCase {
         XCTAssertNil(TextRangeDocumentPlan(upperBound: document.utf16.count, lowerCandidate: 0) {
             self.reply($0, document: document)
         })
-        XCTAssertNil(AccessibilitySelectionPlan(document: document, range: NSRange(location: 0, length: 6), selectedText: "before"))
-        XCTAssertFalse(AccessibilitySelectionPlan.confirmsCaret(document: document, range: NSRange(location: 6, length: 0), selectedText: "",
-                                                               expectedDocument: document, expectedCaret: NSRange(location: 6, length: 0)))
+        let plain = AccessibilitySelectionPlan(document: document, range: NSRange(location: 0, length: 6), selectedText: "before")
+        XCTAssertNotNil(plain)
+        XCTAssertTrue(AccessibilitySelectionPlan.confirmsCaret(document: document, range: NSRange(location: 6, length: 0), selectedText: "",
+                                                              expectedDocument: document, expectedCaret: NSRange(location: 6, length: 0)))
+        XCTAssertNil(AccessibilitySelectionPlan(document: document, range: NSRange(location: 0, length: 8), selectedText: "before \u{FFFC}"))
+        XCTAssertNil(plain?.replacing(with: "after \u{FFFC}"))
         XCTAssertFalse(TextReplacementBackend.acceptsNativeText(document))
         XCTAssertNil(UnicodeTextInput(text: document))
     }

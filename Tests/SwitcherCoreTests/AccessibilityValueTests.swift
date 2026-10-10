@@ -3,6 +3,68 @@ import XCTest
 @testable import SwitcherCore
 
 final class AccessibilityValueTests: XCTestCase {
+    func testApplicationRolePreparationAcceptsOnlyTypedApplicationRole() {
+        XCTAssertTrue(AccessibilityValue.isApplicationRole(kAXApplicationRole as CFString, error: .success))
+        let rejected: [CFTypeRef?] = [nil, kCFNull, kCFBooleanTrue, kAXWindowRole as CFString,
+                                     kAXTextAreaRole as CFString, "AXApplication\n" as CFString,
+                                     [kAXApplicationRole] as CFArray]
+        for value in rejected {
+            XCTAssertFalse(AccessibilityValue.isApplicationRole(value, error: .success))
+        }
+    }
+
+    func testApplicationRoleCannotHideFailedOrEmbeddedAXReply() throws {
+        for error in [AXError.attributeUnsupported, .cannotComplete, .invalidUIElement, .apiDisabled, .noValue] {
+            XCTAssertFalse(AccessibilityValue.isApplicationRole(kAXApplicationRole as CFString, error: error))
+            var error = error
+            let embedded = try XCTUnwrap(AXValueCreate(.axError, &error))
+            XCTAssertFalse(AccessibilityValue.isApplicationRole(embedded, error: .success))
+        }
+    }
+
+    func testFocusedElementReplyRejectsMissingAndNonElementValues() {
+        let candidates: [(CFTypeRef?, AccessibilityElementReply.Status)] = [
+            (nil, .absent), (kCFNull, .absent),
+            ("not an element" as CFString, .malformed), (kCFBooleanTrue, .malformed)
+        ]
+        for (value, expected) in candidates {
+            let reply = AccessibilityElementReply(error: .success, value: value)
+            XCTAssertNil(reply.element)
+            XCTAssertEqual(reply.status, expected)
+            XCTAssertNil(reply.error)
+        }
+        // Constructing a reference sends no query. A collection of references
+        // cannot be substituted for the API's actual focused-element reply.
+        let node = AXUIElementCreateSystemWide()
+        let collection = AccessibilityElementReply(error: .success, value: [node] as CFArray)
+        XCTAssertNil(collection.element)
+        XCTAssertEqual(collection.status, .malformed)
+    }
+
+    func testFailedFocusedElementQueryCannotAuthorizeReturnedReference() {
+        let node = AXUIElementCreateSystemWide()
+        for error in [AXError.cannotComplete, .invalidUIElement, .attributeUnsupported, .noValue, .apiDisabled] {
+            let reply = AccessibilityElementReply(error: error, value: node)
+            XCTAssertNil(reply.element)
+            XCTAssertEqual(reply.status, .failed)
+            XCTAssertEqual(reply.error, error)
+        }
+    }
+
+    func testFocusedElementReplyAcceptsOnlyTypedSuccessAndRejectsEmbeddedError() throws {
+        let node = AXUIElementCreateSystemWide()
+        let valid = AccessibilityElementReply(error: .success, value: node)
+        XCTAssertTrue(CFEqual(try XCTUnwrap(valid.element), node))
+        XCTAssertEqual(valid.status, .available)
+        XCTAssertNil(valid.error)
+        var error = AXError.cannotComplete
+        let embedded = try XCTUnwrap(AXValueCreate(.axError, &error))
+        let invalid = AccessibilityElementReply(error: .success, value: embedded)
+        XCTAssertNil(invalid.element)
+        XCTAssertEqual(invalid.status, .failed)
+        XCTAssertEqual(invalid.error, error)
+    }
+
     func testUnsupportedBatchSlotsDoNotHideUsableRangeOrValue() throws {
         var range = CFRange(location: 5, length: 0)
         var error = AXError.attributeUnsupported

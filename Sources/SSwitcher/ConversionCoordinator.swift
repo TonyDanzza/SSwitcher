@@ -1,11 +1,22 @@
 import AppKit
 import Carbon
+import InputMethodSupport
 import SwitcherCore
 
 /// Main-thread state owner. Each attempt keeps its cancellation and callback
 /// identity; remote AX messages run only through the serial client.
 final class ConversionCoordinator {
     enum Outcome { case ignored, cancelled, converted, unverified, failure(String) }
+    enum Refusal: String {
+        case targetUnavailable, editorUnavailable, editingGuard
+        case documentUnavailable, rangeUnavailable, invalidTextRange, contradictorySelectionRanges
+        case attachmentInScope, selectedTextMismatch, caretUnconfirmed
+        case rangeTextUnavailable, rangeTextMismatch, layoutsUnavailable, wordWidthChanged, replacementBoundary
+        case spotlightCapabilities, nativePayloadUnsupported, unicodePayloadUnsupported
+    }
+    private enum PrewriteRead {
+        case ready(TextReplacementBackend, AXTextScopeRead), scopeRefused(AXTextScopeRead)
+    }
     private let ax = AXClient(policy: .remoteApplication)
     private let localAX = AXClient(policy: .localApplication)
     let overlay = ReplacementOverlay()
@@ -61,6 +72,9 @@ final class ConversionCoordinator {
                          completion: @escaping (Outcome) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard attempt == nil else { completion(.ignored); return }
+        // Refuse a leftover experimental source, so legacy replacement cannot
+        // run beside its separate input-method process. Ordinary layouts use AX.
+        guard InputMethodIdentity.currentMode == nil else { completion(.ignored); return }
         if unconfirmedInput?() == true {
             completion(.failure("Предыдущая замена не подтверждена. Проверьте текст и поставьте курсор заново")); return
         }
@@ -76,11 +90,12 @@ final class ConversionCoordinator {
                                         modifiersClear: modifiersClear, observedModifiersClear: observedModifiersClear,
                                         completion: completion)
         self.attempt = attempt
+        UserDefaults.standard.removeObject(forKey: "LastEditingRefusalDiagnostic")
         diagnosticDetails = "Проверка редактора"
         read(attempt, operation: { $0.target(fallbackPID: frontmost.processIdentifier) }) { [weak self] target in
             guard let self else { return }
             guard let target, let app = NSRunningApplication(processIdentifier: target.pid) else {
-                self.finish(attempt, outcome: .failure("Нет активного поля ввода")); return
+                self.refuse(attempt, .targetUnavailable, "Нет активного поля ввода"); return
             }
             let application = EditorApplication(app)
             attempt.targetPID = application.pid
@@ -90,7 +105,8 @@ final class ConversionCoordinator {
                 self.finish(attempt, outcome: .cancelled); return
             }
             self.read(attempt, operation: {
-                $0.context(application: application, focus: target.focused, spotlight: target.spotlight, cancellation: attempt.cancellation)
+                $0.context(application: application, focus: target.focused, spotlight: target.spotlight,
+                           focusDiscovery: target.focusDiscovery, cancellation: attempt.cancellation)
             }) { context in
                 guard let context else { self.finish(attempt, outcome: .cancelled); return }
                 attempt.context = context
@@ -101,6 +117,7 @@ final class ConversionCoordinator {
 
     private func valid(_ attempt: ConversionAttempt, mutation: Bool = false) -> Bool {
         guard self.attempt === attempt, attempt.lifecycle.canContinue, !attempt.cancellation.isCancelled,
+              InputMethodIdentity.currentMode == nil,
               attempt.unchanged(), !IsSecureEventInputEnabled(),
               attempt.targetPID.map({ SpotlightSearchScope.permitsTarget(foregroundPID: attempt.frontmostPID, targetPID: $0,
                                                                          verifiedOverlay: attempt.spotlightFocus != nil) }) != false,
@@ -121,17 +138,22 @@ final class ConversionCoordinator {
     }
 
     private func begin(_ attempt: ConversionAttempt, context: AXEditorContext) {
+        attempt.phase = "inputProof"
         guard valid(attempt, mutation: true) else { finish(attempt, outcome: .cancelled); return }
         guard let snapshot = context.snapshot, !snapshot.isSecure else {
-            finish(attempt, outcome: .failure("Редактор не предоставил доступное поле ввода")); return
+            refuse(attempt, .editorUnavailable, "Редактор не предоставил доступное поле ввода"); return
         }
         guard context.valueEditable, context.policy.permitsEditing(snapshot) else {
-            finish(attempt, outcome: .failure("Это поле не подтверждает возможность редактирования")); return
+            refuse(attempt, .editingGuard, context.editingRefusal(for: snapshot)); return
         }
-        guard let document = snapshot.value, let range = snapshot.range,
-              AccessibilitySelectionPlan.checkedRange(range, in: document) != nil,
-              AccessibilitySelectionPlan.hasSingleRange(range, selectedRanges: snapshot.selectedRanges) else {
-            finish(attempt, outcome: .failure("Редактор не предоставил согласованный текст и диапазон")); return
+        attempt.editingGuardPassed = true
+        guard let document = snapshot.value else { refuse(attempt, .documentUnavailable, "Редактор не предоставил текст поля"); return }
+        guard let range = snapshot.range else { refuse(attempt, .rangeUnavailable, "Редактор не предоставил диапазон текста"); return }
+        guard AccessibilitySelectionPlan.checkedRange(range, in: document) != nil else {
+            refuse(attempt, .invalidTextRange, "Диапазон редактора не совпадает с границами текста"); return
+        }
+        guard AccessibilitySelectionPlan.hasSingleRange(range, selectedRanges: snapshot.selectedRanges) else {
+            refuse(attempt, .contradictorySelectionRanges, "Редактор предоставил несогласованные диапазоны выделения"); return
         }
         attempt.originalDocument = document
         attempt.originalRange = range
@@ -140,16 +162,22 @@ final class ConversionCoordinator {
         let selection: AccessibilitySelectionPlan
         if attempt.selected {
             guard let plan = snapshot.selectionPlan else {
-                finish(attempt, outcome: .failure("Редактор не подтвердил выделенный текст — выделите его заново")); return
+                if AccessibilitySelectionPlan.hasTextAttachment((document as NSString).substring(with: range)) {
+                    refuse(attempt, .attachmentInScope, "Выделение содержит вложение; выделите только текст")
+                } else { refuse(attempt, .selectedTextMismatch, "Редактор не подтвердил выделенный текст — выделите его заново") }
+                return
             }
             selection = plan
             attempt.selectionPlan = plan
         } else {
             guard AccessibilitySelectionPlan.confirmsCaret(document: document, range: range, selectedText: snapshot.selectedText,
                                                            selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: range) else {
-                finish(attempt, outcome: .failure("Редактор не подтвердил положение курсора")); return
+                refuse(attempt, .caretUnconfirmed, "Редактор не подтвердил положение курсора"); return
             }
             guard let word = WordCursorPlan(value: document, caret: range.location) else { finish(attempt, outcome: .ignored); return }
+            guard !AccessibilitySelectionPlan.hasTextAttachment(word.text) else {
+                refuse(attempt, .attachmentInScope, "Рядом с курсором вложение; выделите только текст"); return
+            }
             let wordRange = NSRange(location: range.location - word.text.utf16.count, length: word.text.utf16.count)
             guard let plan = AccessibilitySelectionPlan(document: document, range: wordRange, selectedText: word.text) else {
                 finish(attempt, outcome: .cancelled); return
@@ -157,15 +185,34 @@ final class ConversionCoordinator {
             selection = plan
             attempt.deletingCharacters = word.deletingCharacters
         }
+        attempt.scopePlan = selection
+        if AccessibilitySelectionPlan.hasTextAttachment(document) {
+            attempt.phase = "attachmentScope"
+            read(attempt, operation: { client in
+                guard client.focusMatches(context) else { return AXTextScopeRead.cancelled }
+                return client.textScope(context, document: document, range: selection.range, cancellation: attempt.cancellation)
+            }) { proof in
+                guard let proof else { self.finish(attempt, outcome: .cancelled); return }
+                attempt.scopeRead = proof
+                guard proof.permitsUse else {
+                    self.refuseScope(attempt, proof); return
+                }
+                self.prepareConversion(attempt, selection: selection, context: context)
+            }
+        } else { prepareConversion(attempt, selection: selection, context: context) }
+    }
+
+    private func prepareConversion(_ attempt: ConversionAttempt, selection: AccessibilitySelectionPlan, context: AXEditorContext) {
+        attempt.phase = "conversionPlan"
         guard let conversion = InputSources.prepare(selection.text) else {
-            finish(attempt, outcome: .failure("Добавьте английскую и русскую раскладки")); return
+            refuse(attempt, .layoutsUnavailable, "Добавьте английскую и русскую раскладки"); return
         }
         guard !AccessibilitySelectionPlan.exactlyEqual(conversion.text, selection.text) else { finish(attempt, outcome: .ignored); return }
         if !attempt.selected, selection.text.count != conversion.text.count {
-            finish(attempt, outcome: .failure("Для этого слова выделите текст вручную")); return
+            refuse(attempt, .wordWidthChanged, "Для этого слова выделите текст вручную"); return
         }
         guard let replacement = selection.replacing(with: conversion.text) else {
-            finish(attempt, outcome: .failure("Для этого фрагмента нельзя безопасно определить конец замены")); return
+            refuse(attempt, .replacementBoundary, "Для этого фрагмента нельзя безопасно определить конец замены"); return
         }
         attempt.converted = conversion
         attempt.replacement = replacement
@@ -214,8 +261,9 @@ final class ConversionCoordinator {
     }
 
     private func validateBeforeMutation(_ attempt: ConversionAttempt) {
+        attempt.phase = "prewrite"
         guard let context = attempt.context else { finish(attempt, outcome: .cancelled); return }
-        read(attempt, operation: { client -> TextReplacementBackend? in
+        read(attempt, operation: { client -> PrewriteRead? in
             guard let document = attempt.originalDocument, let range = attempt.originalRange,
                   let snapshot = client.validate(context, document: document, range: range, includeContext: true),
                   client.isEditable(context, snapshot: snapshot),
@@ -231,13 +279,27 @@ final class ConversionCoordinator {
                                                                     selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: range)
             }
             guard matches else { return nil }
-            return client.replacementBackend(context, snapshot: snapshot, selected: attempt.selected)
-        }) { backend in
-            guard let backend, self.valid(attempt, mutation: true), let conversion = attempt.converted else {
+            guard let scope = attempt.scopePlan else { return nil }
+            let proof = client.textScope(context, document: scope.document, range: scope.range,
+                                         cancellation: attempt.cancellation)
+            guard proof.permitsUse else { return .scopeRefused(proof) }
+            let backend = client.replacementBackend(context, snapshot: snapshot, selected: attempt.selected,
+                                                    replacementText: attempt.converted?.text)
+            if context.qtFocusedWindow != nil, !client.focusMatches(context) { return nil }
+            return .ready(backend, proof)
+        }) { prepared in
+            guard let prepared, self.valid(attempt, mutation: true), let conversion = attempt.converted else {
                 self.finish(attempt, outcome: .cancelled); return
             }
+            let backend: TextReplacementBackend
+            switch prepared {
+            case .scopeRefused(let proof):
+                attempt.scopeRead = proof
+                self.refuseScope(attempt, proof); return
+            case .ready(let selected, let proof): backend = selected; attempt.scopeRead = proof
+            }
             if context.spotlightFocus != nil, backend == .unicodeEvents {
-                self.finish(attempt, outcome: .failure("Spotlight не подтвердил возможность нативной замены")); return
+                self.refuse(attempt, .spotlightCapabilities, "Spotlight не подтвердил возможность нативной замены"); return
             }
             if backend == .accessibilitySpotlightQuery {
                 guard let document = attempt.originalDocument, let caret = attempt.originalRange,
@@ -255,7 +317,7 @@ final class ConversionCoordinator {
             } else if backend == .accessibilitySelectedText {
                 guard let selection = attempt.selectionPlan,
                       TextReplacementBackend.acceptsNativeText(conversion.text, permitsLineBreaks: context.spotlightFocus == nil) else {
-                    self.finish(attempt, outcome: .failure("Этот текст нельзя безопасно преобразовать в редакторе")); return
+                    self.refuse(attempt, .nativePayloadUnsupported, "Этот текст нельзя безопасно преобразовать в редакторе"); return
                 }
                 guard self.reserveMutation(attempt) else { self.finish(attempt, outcome: .cancelled); return }
                 self.diagnosticDetails += "; прямая замена Accessibility"
@@ -272,6 +334,7 @@ final class ConversionCoordinator {
 
     private func reserveMutation(_ attempt: ConversionAttempt) -> Bool {
         guard valid(attempt, mutation: true), attempt.lifecycle.commitMutation() else { return false }
+        attempt.phase = "mutation"
         attempt.image?.show()
         attempt.trace.begin(.mutation)
         return true
@@ -283,7 +346,7 @@ final class ConversionCoordinator {
         guard context.spotlightFocus == nil else { finish(attempt, outcome: .cancelled); return }
         let policy = context.policy.textControlPolicy(for: context.application, snapshot: context.snapshot)
         guard let input = UnicodeTextInput(text: text, controlPolicy: policy) else {
-            finish(attempt, outcome: .failure("В этом приложении нельзя безопасно преобразовать такой текст")); return
+            refuse(attempt, .unicodePayloadUnsupported, "Редактор не поддерживает безопасную замену такого фрагмента"); return
         }
         guard CGPreflightPostEventAccess(), let batches = input.makeEventBatches(deletingCharacters: attempt.deletingCharacters),
               reserveMutation(attempt) else { finish(attempt, outcome: .cancelled); return }
@@ -311,13 +374,14 @@ final class ConversionCoordinator {
     private func awaitAcknowledgement(_ attempt: ConversionAttempt) {
         guard valid(attempt), let context = attempt.context, let replacement = attempt.replacement,
               var deadline = attempt.readiness else { finish(attempt, outcome: .unverified); return }
+        attempt.phase = "acknowledgement"
         let now = ProcessInfo.processInfo.systemUptime
         if deadline.expired(at: now) { finish(attempt, outcome: .unverified); return }
         guard deadline.shouldRead(at: now) else {
             schedule(attempt, delay: deadline.delay(at: now)) { self.awaitAcknowledgement(attempt) }; return
         }
         attempt.readiness = deadline
-        read(attempt, operation: { $0.acknowledgement(context) }) { result in
+        read(attempt, operation: { $0.acknowledgement(context, replacement: replacement, cancellation: attempt.cancellation) }) { result in
             guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else {
                 self.finish(attempt, outcome: .unverified); return
             }
@@ -384,6 +448,17 @@ final class ConversionCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
     }
 
+    private func refuse(_ attempt: ConversionAttempt, _ reason: Refusal, _ message: String) {
+        attempt.refusal = reason
+        finish(attempt, outcome: .failure(message))
+    }
+
+    private func refuseScope(_ attempt: ConversionAttempt, _ proof: AXTextScopeRead) {
+        let reason: Refusal
+        if case .mismatch = proof { reason = .rangeTextMismatch } else { reason = .rangeTextUnavailable }
+        refuse(attempt, reason, "Редактор не подтвердил текст фрагмента рядом с вложением")
+    }
+
     private func finish(_ attempt: ConversionAttempt, outcome: Outcome) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard self.attempt === attempt, attempt.lifecycle.finish() else { return }
@@ -394,6 +469,36 @@ final class ConversionCoordinator {
         if case .converted = outcome { confirmed = true } else { confirmed = false; attempt.image?.close(); overlay.cancel() }
         if case .unverified = outcome { unconfirmedInput = attempt.unchanged; diagnosticDetails += "; результат не подтверждён" }
         if case .cancelled = outcome { diagnosticDetails += "; отменено до ввода" }
+        if let context = attempt.context {
+            var report = context.conversionDiagnostic()
+            switch outcome {
+            case .converted: report["outcome"] = "converted"
+            case .cancelled: report["outcome"] = "cancelled"
+            case .failure: report["outcome"] = "refused"
+            case .unverified: report["outcome"] = "unverified"
+            case .ignored: report["outcome"] = "ignored"
+            }
+            report["editingGuardPassed"] = attempt.editingGuardPassed
+            report["phase"] = attempt.phase
+            if let refusal = attempt.refusal { report["refusalCode"] = refusal.rawValue }
+            if let proof = attempt.scopeRead {
+                report["attachmentRangeText"] = proof.diagnosticCode
+                if case .unavailable(let error) = proof { report["attachmentRangeTextAXError"] = Int(error.rawValue) }
+            }
+            if let snapshot = context.snapshot {
+                report["documentHasAttachment"] = snapshot.value.map(AccessibilitySelectionPlan.hasTextAttachment) ?? false
+                report["inputScope"] = snapshot.range.map { $0.length == 0 ? "caret" : "selection" } ?? "unavailable"
+                report["selectionRanges"] = snapshot.selectedRanges.map { $0.isEmpty ? "empty" : ($0.count == 1 ? "single" : "multiple") } ?? "absent"
+            }
+            if let scope = attempt.scopePlan {
+                report["targetHasAttachment"] = AccessibilitySelectionPlan.hasTextAttachment(scope.text)
+                report["targetHasLineBreaks"] = scope.text.contains("\n") || scope.text.contains("\u{2028}")
+            }
+            report["timestamp"] = Date().timeIntervalSince1970
+            report["version"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+            report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+            UserDefaults.standard.set(report, forKey: "LastEditingRefusalDiagnostic")
+        }
         attempt.trace.finish(confirmed: confirmed)
         self.attempt = nil
         attempt.completion(outcome)
@@ -417,9 +522,14 @@ private final class ConversionAttempt {
     var originalDocument: String?
     var originalRange: NSRange?
     var selectionPlan: AccessibilitySelectionPlan?
+    var scopePlan: AccessibilitySelectionPlan?
+    var scopeRead: AXTextScopeRead?
+    var refusal: ConversionCoordinator.Refusal?
+    var phase = "discovery"
     var replacement: AccessibilityReplacementPlan?
     var deletingCharacters = 0
     var selected = false
+    var editingGuardPassed = false
     var usesNativeSearchValue = false
     var queryCaretRestored = false
     var image: ImageOverlay?

@@ -3,3 +3,8 @@
 build/
 .DS_Store
 *.xcodeproj/xcuserdata/
+
+# Local investigation notes and preserved experiment history
+docs/local/
+docs/resume-max.md
+docs/implementation-brief.txt

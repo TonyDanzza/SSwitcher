@@ -115,4 +115,79 @@ final class AccessibilitySelectionPlanTests: XCTestCase {
         XCTAssertNil(AccessibilitySelectionPlan(document: value, range: NSRange(location: 0, length: value.utf16.count), selectedText: "\n" + original))
     }
 
+    func testPlainSelectionBesideAttachmentsKeepsBothNeighborsAndEmptyCaret() throws {
+        let prefix = "\u{FFFC}\nprefix "
+        let suffix = " suffix\n\u{FFFC}"
+        let original = prefix + "ghbdtn" + suffix
+        let range = NSRange(location: prefix.utf16.count, length: 6)
+        let plan = try XCTUnwrap(AccessibilitySelectionPlan(document: original, range: range,
+                                                          selectedText: "ghbdtn", selectedRanges: [range]))
+        let result = try XCTUnwrap(plan.replacing(with: "мир"))
+        XCTAssertTrue(AccessibilitySelectionPlan.exactlyEqual(result.document, prefix + "мир" + suffix))
+        XCTAssertEqual(result.caret, NSRange(location: prefix.utf16.count + 3, length: 0))
+        XCTAssertTrue(result.confirmsCaret(document: result.document, range: result.caret, selectedText: "", selectedRanges: [result.caret]))
+        XCTAssertFalse(result.confirmsCaret(document: result.document, range: result.range, selectedText: "мир"))
+        let reverse = try XCTUnwrap(AccessibilitySelectionPlan(document: result.document, range: result.range, selectedText: "мир"))
+        XCTAssertTrue(AccessibilitySelectionPlan.exactlyEqual(try XCTUnwrap(reverse.replacing(with: "ghbdtn")).document, original))
+    }
+
+    func testWordAtActualEndBesideAttachmentCanBeAcknowledgedAndReplanned() throws {
+        let original = "\u{FFFC}\nghbdtn suffix"
+        let caret = NSRange(location: 8, length: 0)
+        XCTAssertTrue(AccessibilitySelectionPlan.confirmsCaret(document: original, range: caret, selectedText: "",
+                                                              expectedDocument: original, expectedCaret: caret))
+        let word = try XCTUnwrap(WordCursorPlan(value: original, caret: caret.location))
+        XCTAssertEqual(word.text, "ghbdtn")
+        let plan = try XCTUnwrap(AccessibilitySelectionPlan(document: original,
+                                                          range: NSRange(location: 2, length: 6), selectedText: word.text))
+        let result = try XCTUnwrap(plan.replacing(with: "привет"))
+        XCTAssertTrue(result.confirmsCaret(document: result.document, range: result.caret, selectedText: nil))
+        XCTAssertEqual(WordCursorPlan(value: result.document, caret: result.caret.location)?.text, "привет")
+        XCTAssertNil(WordCursorPlan(value: result.document, caret: result.caret.location - 1))
+        XCTAssertNil(WordCursorPlan(value: result.document, caret: result.caret.location + 1))
+    }
+
+    func testAnyAttachmentInsideTargetOrReplacementStillRefuses() throws {
+        let original = "a\u{FFFC}ghbdtn\u{FFFC}b"
+        let safe = try XCTUnwrap(AccessibilitySelectionPlan(document: original, range: NSRange(location: 2, length: 6), selectedText: "ghbdtn"))
+        for range in [NSRange(location: 1, length: 1), NSRange(location: 1, length: 7),
+                      NSRange(location: 2, length: 7), NSRange(location: 0, length: original.utf16.count)] {
+            XCTAssertNil(AccessibilitySelectionPlan(document: original, range: range, selectedText: nil))
+        }
+        XCTAssertNil(safe.replacing(with: "привет\u{FFFC}"))
+        XCTAssertNil(safe.replacing(with: "\u{301}")) // Would merge into the preceding marker's grapheme.
+    }
+
+    func testRangeStringProofRejectsExpandedClippedNormalizedOrWrongOffsetReplies() {
+        let text = "ghbdtn\n🙂 e\u{301}"
+        let original = "\u{FFFC}\n" + text + " suffix"
+        let range = NSRange(location: 2, length: text.utf16.count)
+        XCTAssertTrue(AccessibilitySelectionPlan.confirmsRangeText(text, document: original, range: range))
+        let replies: [String?] = [nil, "ghbdtn", "image " + text, text.replacingOccurrences(of: "\n", with: ""),
+                                 "ghbdtn\n🙂 é", text + "\u{FFFC}"]
+        for reply in replies {
+            XCTAssertFalse(AccessibilitySelectionPlan.confirmsRangeText(reply, document: original, range: range))
+        }
+        XCTAssertFalse(AccessibilitySelectionPlan.confirmsRangeText(text, document: original,
+                                                                   range: NSRange(location: 0, length: text.utf16.count)))
+        XCTAssertFalse(AccessibilitySelectionPlan.confirmsRangeText(text, document: original,
+                                                                   range: NSRange(location: Int.max, length: 1)))
+    }
+
+    func testAttachmentNeighborsAndMultilineUnicodeMustRemainExactBeforeAndAfterWrite() throws {
+        let text = "ghbdtn\nvbh 🙂 e\u{301}"
+        let original = "\u{FFFC}\n" + text + "\n\u{FFFC}"
+        let plan = try XCTUnwrap(AccessibilitySelectionPlan(document: original, range: NSRange(location: 2, length: text.utf16.count), selectedText: text))
+        let result = try XCTUnwrap(plan.replacing(with: "привет\nмир 🙂 e\u{301}"))
+        XCTAssertTrue(result.confirmsCaret(document: result.document, range: result.caret, selectedText: ""))
+        for changed in [original.replacingOccurrences(of: "\u{FFFC}", with: ""), original + "!",
+                        original.replacingOccurrences(of: "\u{FFFC}", with: "image")] {
+            XCTAssertFalse(plan.matches(document: changed, range: plan.range, selectedText: text))
+        }
+        for changed in [result.document.replacingOccurrences(of: "\u{FFFC}", with: ""), result.document + "!",
+                        result.document.replacingOccurrences(of: "e\u{301}", with: "é")] {
+            XCTAssertFalse(result.confirmsCaret(document: changed, range: result.caret, selectedText: ""))
+        }
+    }
+
 }

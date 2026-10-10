@@ -8,10 +8,13 @@ public struct AccessibilitySelectionPlan: Equatable {
     public let text: String
 
     public init?(document: String?, range: NSRange?, selectedText: String?, selectedRanges: [NSRange]? = nil) {
-        guard let document, let range, range.length > 0, !Self.hasTextAttachment(document),
+        guard let document, let range, range.length > 0,
               Self.hasSingleRange(range, selectedRanges: selectedRanges),
               let stringRange = Self.checkedRange(range, in: document) else { return nil }
         let text = String(document[stringRange])
+        // An attachment elsewhere is an untouched neighbor, not part of this
+        // replacement. Its exact UTF-16 marker remains in document/readback.
+        guard !Self.hasTextAttachment(text) else { return nil }
         if let selectedText, !Self.exactlyEqual(text, selectedText) { return nil }
         self.document = document
         self.range = range
@@ -41,6 +44,15 @@ public struct AccessibilitySelectionPlan: Equatable {
         left.utf16.elementsEqual(right.utf16)
     }
 
+    /// A public range-string reply must describe this exact logical fragment.
+    /// Expanded attachment labels, clipped replies and normalization cannot
+    /// supply offsets for a replacement or its acknowledgement.
+    public static func confirmsRangeText(_ text: String?, document: String, range: NSRange) -> Bool {
+        guard let text, let checked = checkedRange(range, in: document),
+              !hasTextAttachment(text) else { return false }
+        return exactlyEqual(String(document[checked]), text)
+    }
+
     public static func hasSingleRange(_ range: NSRange, selectedRanges: [NSRange]?) -> Bool {
         guard let selectedRanges else { return true }
         return selectedRanges == [range]
@@ -48,7 +60,7 @@ public struct AccessibilitySelectionPlan: Equatable {
 
     public static func confirmsCaret(document: String?, range: NSRange?, selectedText: String?,
                                      selectedRanges: [NSRange]? = nil, expectedDocument: String, expectedCaret: NSRange) -> Bool {
-        guard let document, let range, range == expectedCaret, range.length == 0, !hasTextAttachment(document),
+        guard let document, let range, range == expectedCaret, range.length == 0,
               exactlyEqual(document, expectedDocument), checkedRange(range, in: document) != nil,
               hasSingleRange(range, selectedRanges: selectedRanges) else { return false }
         return selectedText == nil || selectedText?.isEmpty == true

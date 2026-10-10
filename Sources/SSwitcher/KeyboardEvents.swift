@@ -3,19 +3,23 @@ import Foundation
 import SwitcherCore
 
 enum KeyboardEvents {
+    private(set) static var lastNavigationModifiers: CGEventFlags = []
+    private(set) static var lastNavigationHasSpecialCharacter = false
     private static var delivery = KeyboardEventDelivery()
     private static var deliveryCompletion: ((Bool) -> Void)?
     private static var deliveryTimeout: DispatchWorkItem?
-
-    static func post(_ events: [CGEvent]) {
-        for event in events { event.post(tap: .cghidEventTap) }
-    }
+    private static var targetTap: CFMachPort?
+    private static var targetSource: CFRunLoopSource?
 
     /// The final key-up receipt paces our batches through the system queue.
     /// It does not prove editor handling; fresh AX evidence is still required.
-    static func postAndAwaitDelivery(_ events: [CGEvent], completion: @escaping (Bool) -> Void) {
+    static func postAndAwaitDelivery(_ events: [CGEvent], targetPID: pid_t? = nil, directToTarget: Bool = true,
+                                    postingTap: CGEventTapLocation = .cghidEventTap, navigationToTarget: Bool = false,
+                                    completion: @escaping (Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard let last = events.last, last.type == .keyUp, let token = delivery.begin() else {
+        guard let last = events.last, last.type == .keyUp, last.flags.isEmpty,
+              events.allSatisfy({ $0.type == .keyDown || $0.type == .keyUp }),
+              let token = delivery.begin() else {
             completion(false); return
         }
         deliveryCompletion = completion
@@ -24,20 +28,49 @@ enum KeyboardEvents {
             completeDelivery(false)
             return
         }
+        if let targetPID {
+            let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.keyUp.rawValue)
+            guard let tap = CGEvent.tapCreateForPid(pid: targetPID, place: .tailAppendEventTap, options: .listenOnly,
+                eventsOfInterest: mask, callback: { _, type, event, _ in
+                    if type == .keyDown || type == .keyUp { _ = KeyboardEvents.received(event, fromTarget: true) }
+                    return Unmanaged.passUnretained(event)
+                }, userInfo: nil), let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
+                _ = delivery.cancel(); completeDelivery(false); return
+            }
+            targetTap = tap; targetSource = source
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
         let timeout = DispatchWorkItem {
             guard delivery.acknowledge(marker: token) else { return }
             completeDelivery(false)
         }
         deliveryTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.eventDeliveryDeadline, execute: timeout)
-        post(events)
+        func post(_ event: CGEvent) {
+            event.timestamp = DispatchTime.now().uptimeNanoseconds
+            // Qt consumes navigation on its native responder; Services key
+            // equivalents must still traverse the AppKit session routing.
+            let arrow = (123...126).contains(event.getIntegerValueField(.keyboardEventKeycode))
+            if let targetPID, directToTarget || (navigationToTarget && arrow) { event.postToPid(targetPID) }
+            else { event.post(tap: postingTap) }
+        }
+        for event in events { post(event) }
     }
 
     /// Called only from the listening tap; callbacks resume after it returns.
-    static func received(_ event: CGEvent) -> Bool {
+    static func received(_ event: CGEvent, fromTarget: Bool = false) -> Bool {
         let token = event.getIntegerValueField(.eventSourceUserData)
         guard KeyboardEventDelivery.isSynthetic(marker: token) else { return false }
-        if event.type == .keyUp, delivery.acknowledge(marker: token) { completeDelivery(true) }
+        if event.type == .keyDown, [123, 124, 125, 126, 80, 90].contains(event.getIntegerValueField(.keyboardEventKeycode)) {
+            lastNavigationModifiers = event.flags.intersection([.maskShift, .maskCommand, .maskControl, .maskAlternate])
+            var character: UniChar = 0
+            var count = 0
+            event.keyboardGetUnicodeString(maxStringLength: 1, actualStringLength: &count, unicodeString: &character)
+            lastNavigationHasSpecialCharacter = count == 1 && (0xf700...0xf717).contains(character)
+        }
+        if event.type == .keyUp, (targetTap == nil || fromTarget),
+           delivery.acknowledge(marker: token) { completeDelivery(true) }
         return true
     }
 
@@ -46,6 +79,9 @@ enum KeyboardEvents {
     }
 
     private static func completeDelivery(_ delivered: Bool) {
+        if let targetSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), targetSource, .commonModes) }
+        if let targetTap { CGEvent.tapEnable(tap: targetTap, enable: false); CFMachPortInvalidate(targetTap) }
+        targetSource = nil; targetTap = nil
         deliveryTimeout?.cancel(); deliveryTimeout = nil
         let completion = deliveryCompletion
         deliveryCompletion = nil

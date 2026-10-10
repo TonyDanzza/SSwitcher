@@ -3,6 +3,27 @@ import CoreGraphics
 @testable import SwitcherCore
 
 final class KeyboardEventDeliveryTests: XCTestCase {
+    func testReceiptTagPreservesKeyboardSourceState() throws {
+        for state in [CGEventSourceStateID.privateState, .hidSystemState] {
+            let source = try XCTUnwrap(CGEventSource(stateID: state))
+            let down = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 123, keyDown: true))
+            let up = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 123, keyDown: false))
+            XCTAssertTrue(KeyboardEventDelivery.tagFinalPair([down, up], marker: 42))
+            let result = try XCTUnwrap(CGEventSource(event: down))
+            XCTAssertEqual(result.sourceStateID, source.sourceStateID)
+            XCTAssertEqual(result.keyboardType, source.keyboardType)
+        }
+    }
+    func testReceiptTagPreservesNavigationModifiers() throws {
+        let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
+        let down = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 123, keyDown: true))
+        let up = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 123, keyDown: false))
+        down.flags = [.maskAlternate, .maskShift]
+        up.flags = []
+        XCTAssertTrue(KeyboardEventDelivery.tagFinalPair([down, up], marker: 42))
+        XCTAssertEqual(down.flags, [.maskAlternate, .maskShift])
+        XCTAssertEqual(up.flags, [])
+    }
     func testFinalPairSourceRetainsReceiptThroughMetadataRegeneration() throws {
         let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
         var events: [CGEvent] = []

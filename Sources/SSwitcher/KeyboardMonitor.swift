@@ -43,16 +43,22 @@ final class KeyboardMonitor {
         burst.complete(at: ProcessInfo.processInfo.systemUptime, unverified: unverified)
         detector.reset()
     }
-    func focusChanged() {
+    func focusChanged(isUserIntervention: Bool = true) {
         inputGeneration &+= 1
-        burst.realInput()
+        if isUserIntervention { burst.realInput() }
+        else { burst.cancel() }
         pendingDispatch?.cancel(); pendingDispatch = nil
         detector.cancelGesture()
         onGestureCancelled?()
         onRealInput?()
     }
     func triggerForDiagnostics() {
-        guard canStartConversion?() != false, physicalModifiersClear else { return }
+        let allowed = canStartConversion?() != false
+        let clear = physicalModifiersClear
+        UserDefaults.standard.set(["build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+            "allowed": allowed, "physicalClear": clear, "observedClear": observedModifiersClear,
+            "heldModifiers": hardwareModifierKeysDown.sorted()], forKey: "DiagnosticTriggerReport")
+        guard allowed, clear else { return }
         lastGestureRelease = ProcessInfo.processInfo.systemUptime
         burst.shiftChanged(down: false, at: lastGestureRelease)
         onGestureRelease?(lastGestureRelease)

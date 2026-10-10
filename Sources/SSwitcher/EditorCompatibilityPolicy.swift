@@ -7,6 +7,7 @@ struct EditorApplication {
     let bundleID: String
     let session: String
     let isElectron: Bool
+    let isQtQuick: Bool
 
     init(_ application: NSRunningApplication) {
         pid = application.processIdentifier
@@ -16,6 +17,7 @@ struct EditorApplication {
         let version = bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
         session = "\(pid):\(application.launchDate?.timeIntervalSince1970 ?? 0):\(bundleID):\(version)"
         isElectron = ElectronApplicationBundle.recognizes(application.bundleURL)
+        isQtQuick = QtQuickApplicationBundle.recognizes(application.bundleURL)
     }
 }
 
@@ -33,12 +35,17 @@ struct EditorCompatibilityPolicy {
     }
     func replacementBackend(for application: EditorApplication, snapshot: AXEditorSnapshot, selected: Bool,
                             selectedTextSettable: Bool, verifiedSpotlightSearch: Bool = false,
-                            queryValueSettable: Bool = false, queryRangeSettable: Bool = false) -> TextReplacementBackend {
-        .select(isSelected: selected, bundleID: application.bundleID,
+                            queryValueSettable: Bool = false, queryRangeSettable: Bool = false,
+                            replacementText: String? = nil) -> TextReplacementBackend {
+        let needsNativePayload = replacementText.map {
+            UnicodeTextInput(text: $0, controlPolicy: textControlPolicy(for: application, snapshot: snapshot)) == nil &&
+                TextReplacementBackend.acceptsNativeText($0)
+        } == true
+        return .select(isSelected: selected, bundleID: application.bundleID,
                 isCurrentProcess: application.pid == ProcessInfo.processInfo.processIdentifier,
                 isElectron: application.isElectron, role: snapshot.role, selectedTextSettable: selectedTextSettable,
                 verifiedSpotlightSearch: verifiedSpotlightSearch, queryValueSettable: queryValueSettable,
-                queryRangeSettable: queryRangeSettable)
+                queryRangeSettable: queryRangeSettable, requiresNativePayload: needsNativePayload, isFigma: isFigma)
     }
     func textControlPolicy(for application: EditorApplication, snapshot: AXEditorSnapshot?) -> UnicodeTextInput.ControlPolicy {
         // Only public range-string/end-point proof enables Figma Return/ShiftReturn

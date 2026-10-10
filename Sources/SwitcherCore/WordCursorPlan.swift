@@ -6,13 +6,8 @@ public struct WordCursorPlan: Equatable {
     public var deletingCharacters: Int { text.count }
 
     public init?(value: String, caret: Int) {
-        guard let token = TextConversion.tokenRange(in: value, caret: caret),
-              let range = Range(token, in: value),
-              let caretRange = Range(NSRange(location: caret, length: 0), in: value),
-              value.indices.contains(caretRange.lowerBound) || caretRange.lowerBound == value.endIndex,
-              caretRange.lowerBound >= range.lowerBound, caretRange.lowerBound <= range.upperBound else { return nil }
-        guard caretRange.lowerBound == range.upperBound else { return nil }
-        let word = String(value[range])
+        guard let scope = WordScopePlan(value: value, caret: caret) else { return nil }
+        let word = scope.text
         guard !word.isEmpty, word.count <= 256, word.utf16.count == word.count else { return nil }
         text = word
     }

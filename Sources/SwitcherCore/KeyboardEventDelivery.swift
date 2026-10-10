@@ -19,7 +19,9 @@ public struct KeyboardEventDelivery {
     public static func tagFinalPair(_ events: [CGEvent], marker: Int64) -> Bool {
         guard events.count >= 2, events[events.count - 2].type == .keyDown,
               events[events.count - 1].type == .keyUp,
-              let source = CGEventSource(stateID: .privateState) else { return false }
+              let original = CGEventSource(event: events[events.count - 2]),
+              let source = SyntheticKeyboardSource.make(state: original.sourceStateID) else { return false }
+        source.keyboardType = original.keyboardType
         source.userData = marker
         for event in events.suffix(2) {
             event.setSource(source)

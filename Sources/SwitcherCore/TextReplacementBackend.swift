@@ -1,5 +1,6 @@
-/// Native setters need demonstrated behavior, not merely a successful
-/// capability query. Other editors keep the immutable Unicode event transport.
+/// Working Unicode transports stay unchanged. A native selected-fragment
+/// setter can carry a payload that cannot be represented safely by that
+/// transport, with fresh capability/scope proof and exact acknowledgement.
 public enum TextReplacementBackend: Equatable {
     case unicodeEvents
     case accessibilitySelectedText
@@ -8,13 +9,14 @@ public enum TextReplacementBackend: Equatable {
     public static func select(isSelected: Bool, bundleID: String, isCurrentProcess: Bool,
                               isElectron: Bool, role: String?, selectedTextSettable: Bool,
                               verifiedSpotlightSearch: Bool = false, queryValueSettable: Bool = false,
-                              queryRangeSettable: Bool = false) -> Self {
+                              queryRangeSettable: Bool = false, requiresNativePayload: Bool = false,
+                              isFigma: Bool = false) -> Self {
         if !isSelected, verifiedSpotlightSearch, bundleID == "com.apple.campo", role == "AXTextField",
            !isElectron, queryValueSettable, queryRangeSettable { return .accessibilitySpotlightQuery }
         guard isSelected, selectedTextSettable, !isElectron else { return .unicodeEvents }
         if verifiedSpotlightSearch, bundleID == "com.apple.campo", role == "AXTextField" { return .accessibilitySelectedText }
         guard role == "AXTextArea",
-              isCurrentProcess || bundleID == "com.apple.TextEdit" else { return .unicodeEvents }
+              isCurrentProcess || bundleID == "com.apple.TextEdit" || (requiresNativePayload && !isFigma) else { return .unicodeEvents }
         return .accessibilitySelectedText
     }
 

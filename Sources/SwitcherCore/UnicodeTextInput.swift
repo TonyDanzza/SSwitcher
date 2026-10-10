@@ -61,7 +61,7 @@ public struct UnicodeTextInput {
     /// caller reserves its one mutation. This does not establish that a target
     /// framework supports Unicode keyboard events; editor proof is separate.
     public func makeEvents(virtualKey: CGKeyCode = 0) -> [CGEvent]? {
-        guard let source = CGEventSource(stateID: .privateState) else { return nil }
+        guard let source = SyntheticKeyboardSource.make() else { return nil }
         source.userData = KeyboardEventDelivery.sourceMarker
         var events: [CGEvent] = []
         events.reserveCapacity(actions.count * 2)
@@ -99,7 +99,7 @@ public struct UnicodeTextInput {
         guard deletingCharacters >= 0, let textEvents = makeEvents(), !textEvents.isEmpty else { return nil }
         var batches = stride(from: 0, to: textEvents.count, by: 2).map { Array(textEvents[$0..<($0 + 2)]) }
         if deletingCharacters > 0 {
-            guard let source = CGEventSource(stateID: .privateState) else { return nil }
+            guard let source = SyntheticKeyboardSource.make() else { return nil }
             source.userData = KeyboardEventDelivery.sourceMarker
             var initial: [CGEvent] = []
             for _ in 0..<deletingCharacters {

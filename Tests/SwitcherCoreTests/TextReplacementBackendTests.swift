@@ -55,6 +55,31 @@ final class TextReplacementBackendTests: XCTestCase {
         }
     }
 
+    func testGenericNativeSelectedFragmentIsOnlyForAnOtherwiseUnsupportedSafePayload() {
+        func backend(_ text: String, selected: Bool = true, settable: Bool = true,
+                     electron: Bool = false, figma: Bool = false, role: String = "AXTextArea") -> TextReplacementBackend {
+            let needsNative = UnicodeTextInput(text: text, controlPolicy: .singleLine) == nil &&
+                TextReplacementBackend.acceptsNativeText(text)
+            return .select(isSelected: selected, bundleID: "ordinary.native.editor", isCurrentProcess: false,
+                           isElectron: electron, role: role, selectedTextSettable: settable,
+                           requiresNativePayload: needsNative, isFigma: figma)
+        }
+        XCTAssertEqual(backend("ghbdtn"), .unicodeEvents)
+        XCTAssertEqual(backend(String(repeating: "ghbdtn", count: 100)), .unicodeEvents)
+        let oversizedGrapheme = "e" + String(repeating: "\u{301}", count: 25)
+        for text in ["ghbdtn\nvbh", "ghbdtn\u{2028}vbh", oversizedGrapheme] {
+            XCTAssertEqual(backend(text), .accessibilitySelectedText)
+            XCTAssertEqual(backend(text, selected: false), .unicodeEvents)
+            XCTAssertEqual(backend(text, settable: false), .unicodeEvents)
+            XCTAssertEqual(backend(text, electron: true), .unicodeEvents)
+            XCTAssertEqual(backend(text, figma: true), .unicodeEvents)
+            XCTAssertEqual(backend(text, role: "AXTextField"), .unicodeEvents)
+        }
+        for text in ["ghbdtn\rvbh", "ghbdtn\tvbh", "ghbdtn\u{2029}vbh", "ghbdtn\u{FFFC}", ""] {
+            XCTAssertEqual(backend(text), .unicodeEvents)
+        }
+    }
+
     func testSetterSuccessWithUnchangedDocumentCannotAcknowledgeOrReserveFallback() throws {
         let original = "prefix ghbdtn suffix"
         let selection = try XCTUnwrap(AccessibilitySelectionPlan(document: original, range: NSRange(location: 7, length: 6), selectedText: "ghbdtn"))
