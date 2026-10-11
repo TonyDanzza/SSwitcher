@@ -27,4 +27,18 @@ final class ExpiringCacheTests: XCTestCase {
         XCTAssertEqual(cache.count, 0)
         XCTAssertNil(cache.value(for: 2, at: 3))
     }
+    func testEntriesExpireIndependentlyWithoutEarlyPurge() {
+        var cache = ExpiringCache<String, Int>()
+        cache.insert(1, for: "short", at: 0, lifetime: 1)
+        cache.insert(2, for: "long", at: 0, lifetime: 10)
+        XCTAssertEqual(cache.value(for: "short", at: 0.5), 1)
+        XCTAssertEqual(cache.count, 2)
+        XCTAssertNil(cache.value(for: "short", at: 1))
+        XCTAssertEqual(cache.count, 1)
+        XCTAssertEqual(cache.value(for: "long", at: 9), 2)
+        // Replacing an entry with a shorter lifetime still expires it on time.
+        cache.insert(3, for: "long", at: 9, lifetime: 0.5)
+        XCTAssertNil(cache.value(for: "long", at: 9.5))
+        XCTAssertEqual(cache.count, 0)
+    }
 }
