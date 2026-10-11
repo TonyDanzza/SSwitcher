@@ -9,7 +9,21 @@ struct EditorApplication {
     let isElectron: Bool
     let isQtQuick: Bool
 
-    init(_ application: NSRunningApplication) {
+    private static var described: [String: EditorApplication] = [:]
+
+    /// Package checks read the bundle from disk; remember them for each
+    /// running instance (process and launch time). Main thread only.
+    static func describing(_ application: NSRunningApplication) -> EditorApplication {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let instance = "\(application.processIdentifier):\(application.launchDate?.timeIntervalSince1970 ?? 0)"
+        if let known = described[instance] { return known }
+        let value = EditorApplication(application)
+        if described.count >= 32 { described.removeAll() }
+        described[instance] = value
+        return value
+    }
+
+    private init(_ application: NSRunningApplication) {
         pid = application.processIdentifier
         name = application.localizedName ?? "Редактор"
         bundleID = application.bundleIdentifier ?? ""

@@ -32,7 +32,7 @@ final class ConversionCoordinator {
     private func client(for pid: pid_t) -> AXClient {
         pid == ProcessInfo.processInfo.processIdentifier ? localAX : ax
     }
-    func prepareAccessibility(for app: NSRunningApplication) { client(for: app.processIdentifier).prepareAccessibility(for: EditorApplication(app)) }
+    func prepareAccessibility(for app: NSRunningApplication) { client(for: app.processIdentifier).prepareAccessibility(for: .describing(app)) }
 
     func userInputChanged() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -104,7 +104,7 @@ final class ConversionCoordinator {
             guard let target, let app = NSRunningApplication(processIdentifier: target.pid) else {
                 self.refuse(attempt, .targetUnavailable, "Нет активного поля ввода"); return
             }
-            let application = EditorApplication(app)
+            let application = EditorApplication.describing(app)
             attempt.targetPID = application.pid
             attempt.spotlightFocus = target.spotlight
             guard SpotlightSearchScope.permitsTarget(foregroundPID: attempt.frontmostPID, targetPID: application.pid,
