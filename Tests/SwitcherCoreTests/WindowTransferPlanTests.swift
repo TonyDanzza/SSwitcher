@@ -247,4 +247,54 @@ final class WindowTransferPlanTests: XCTestCase {
         XCTAssertEqual(try move(CGRect(x: 1600, y: -100, width: 900, height: 1200), [laptop, monitor], .left).frame.size,
                        CGSize(width: 900, height: 924))
     }
+
+    func testStepProgressAcceptsSystemAdjustmentsOnlyOnceStable() {
+        // A display constraint keeps the window 2 pt lower and 2 pt shorter.
+        var progress = WindowStepProgress(operation: .position(CGPoint(x: 579, y: 1472)), before: CGRect(x: 0, y: 31, width: 1470, height: 924))
+        let adjusted = CGRect(x: 579, y: 1474, width: 1470, height: 922)
+        XCTAssertEqual(progress.observe(adjusted, at: 0), .waiting)
+        XCTAssertEqual(progress.observe(adjusted, at: 0.02), .waiting)
+        XCTAssertEqual(progress.observe(adjusted, at: 0.04), .adjusted(adjusted))
+        // An exact frame is applied at once.
+        var exact = WindowStepProgress(operation: .size(CGSize(width: 735, height: 924)), before: CGRect(x: 0, y: 31, width: 1280, height: 1409))
+        XCTAssertEqual(exact.observe(CGRect(x: 0, y: 31, width: 735, height: 924), at: 0), .applied(CGRect(x: 0, y: 31, width: 735, height: 924)))
+        // A step with no visible effect needs a longer quiet time; a change restarts it.
+        let before = CGRect(x: 100, y: 100, width: 484, height: 280)
+        var minimum = WindowStepProgress(operation: .size(CGSize(width: 400, height: 200)), before: before)
+        XCTAssertEqual(minimum.observe(before, at: 0), .waiting)
+        XCTAssertEqual(minimum.observe(before, at: 0.1), .waiting)
+        XCTAssertEqual(minimum.observe(before, at: 0.2), .unchanged(before))
+        var moving = WindowStepProgress(operation: .size(CGSize(width: 2560, height: 1409)), before: CGRect(x: 0, y: 31, width: 1470, height: 922))
+        XCTAssertEqual(moving.observe(CGRect(x: 0, y: 31, width: 1800, height: 1200), at: 0), .waiting)
+        XCTAssertEqual(moving.observe(CGRect(x: 0, y: 31, width: 2049, height: 1409), at: 0.03), .waiting)
+        XCTAssertEqual(moving.observe(CGRect(x: 0, y: 31, width: 2049, height: 1409), at: 0.05), .waiting)
+        XCTAssertEqual(moving.observe(CGRect(x: 0, y: 31, width: 2049, height: 1409), at: 0.07), .adjusted(CGRect(x: 0, y: 31, width: 2049, height: 1409)))
+    }
+
+    func testGrowthAndShortfallAndAdjustedOriginSkipping() {
+        let size = WindowFrameOperation.size(CGSize(width: 1280, height: 1409))
+        let afterMove = CGRect(x: 1280, y: 31, width: 735, height: 922)
+        XCTAssertTrue(size.grows(afterMove))
+        XCTAssertFalse(size.grows(CGRect(x: 0, y: 0, width: 1280, height: 1409)))
+        XCTAssertTrue(size.fallsShort(CGRect(x: 1280, y: 31, width: 769, height: 1409)))
+        XCTAssertFalse(size.fallsShort(CGRect(x: 1280, y: 31, width: 1280, height: 1409)))
+        XCTAssertFalse(WindowFrameOperation.position(.zero).grows(afterMove))
+        let correction = WindowFrameOperation.position(CGPoint(x: 579, y: 1472))
+        let adjusted = CGRect(x: 579, y: 1474, width: 1470, height: 922)
+        XCTAssertFalse(correction.isSatisfied(by: adjusted, acceptedOrigin: nil))
+        XCTAssertTrue(correction.isSatisfied(by: adjusted, acceptedOrigin: CGPoint(x: 579, y: 1474)))
+        XCTAssertFalse(correction.isSatisfied(by: CGRect(x: 600, y: 1474, width: 1470, height: 922), acceptedOrigin: CGPoint(x: 579, y: 1474)))
+    }
+
+    func testOutcomeIsMovedAdjustedOrUnconfirmed() throws {
+        let plan = try move(CGRect(x: 0, y: 31, width: 2560, height: 1409), [lg, macBook], .down)
+        XCTAssertEqual(WindowTransferOutcome.classify(final: CGRect(x: 579, y: 1474, width: 1470, height: 922), plan: plan,
+                                                      displays: [lg, macBook]), .moved)
+        XCTAssertEqual(WindowTransferOutcome.classify(final: CGRect(x: 579, y: 1474, width: 1600, height: 922), plan: plan,
+                                                      displays: [lg, macBook]), .adjusted)
+        XCTAssertEqual(WindowTransferOutcome.classify(final: CGRect(x: 0, y: 31, width: 1470, height: 922), plan: plan,
+                                                      displays: [lg, macBook]), .unconfirmed)
+        XCTAssertEqual(WindowTransferPlan.mainDisplay(of: CGRect(x: 700, y: 1100, width: 600, height: 400), in: [lg, macBook])?.id, 3)
+        XCTAssertNil(WindowTransferPlan.mainDisplay(of: CGRect(x: 5000, y: 0, width: 10, height: 10), in: [lg, macBook]))
+    }
 }

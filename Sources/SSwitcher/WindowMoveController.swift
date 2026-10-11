@@ -138,27 +138,42 @@ private final class WindowAXClient {
 }
 
 /// One shortcut owns one focused window. AX setters cannot be atomic across
-/// processes; every step revalidates identity and never retries a mutation.
+/// processes; every step revalidates identity and is never repeated blindly.
+/// macOS or the application may adjust a step (minimum sizes, size
+/// increments, display constraints); a stable AX frame is then accepted.
 final class WindowMoveController {
     private final class Attempt {
         let pid: pid_t
+        let direction: WindowMoveDirection
         let screens: WindowScreenSnapshot
         let cancellation = AttemptCancellation()
+        let started = ProcessInfo.processInfo.systemUptime
         let writeDeadline = ProcessInfo.processInfo.systemUptime + 2
         var context: WindowAXContext?
         var plan: WindowTransferPlan?
         var expected: CGRect = .zero
         var operations: [WindowFrameOperation] = []
         var didIssueWrite = false
+        /// Origin macOS accepted for the move; later position steps that
+        /// would request the same target are already satisfied by it.
+        var acceptedOrigin: CGPoint?
+        var changedDisplay = false
+        var settledForGrowth = false
+        var repeatedGrowth = false
+        var steps: [[String: Any]] = []
         var poll: DispatchWorkItem?
         var preparationTimeout: DispatchWorkItem?
-        init(pid: pid_t, screens: WindowScreenSnapshot) { self.pid = pid; self.screens = screens }
+        init(pid: pid_t, direction: WindowMoveDirection, screens: WindowScreenSnapshot) {
+            self.pid = pid; self.direction = direction; self.screens = screens
+        }
     }
     private let remote = WindowAXClient(policy: .remoteApplication)
     private let local = WindowAXClient(policy: .localApplication)
     private var attempt: Attempt?
     private var screenObserver: NSObjectProtocol?
     private(set) var lastResult = "Перенос окна: ещё не выполнялся"
+    /// Planned and actual geometry of the last transfer, for the diagnostics window.
+    private(set) var lastDetails = ""
     var onResult: (() -> Void)?
 
     init() {
@@ -167,7 +182,7 @@ final class WindowMoveController {
     func cancel() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let attempt else { return }
-        finish(attempt, message: attempt.didIssueWrite ? "Перенос окна: результат не подтверждён" : "Перенос окна отменён")
+        finish(attempt, message: attempt.didIssueWrite ? "Перенос окна: результат не подтверждён" : "Перенос окна отменён", outcome: "cancelled")
     }
     /// Event-tap callback performs only cancellation bookkeeping. UI status is
     /// dispatched after returning from the tap, while the worker sees it now.
@@ -184,21 +199,22 @@ final class WindowMoveController {
         guard attempt == nil else { return } // Drop repeated presses; never queue a different target.
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication,
               let screens = WindowScreenSnapshot.capture() else { lastResult = "Для переноса окна нужен Универсальный доступ"; onResult?(); return }
-        let attempt = Attempt(pid: app.processIdentifier, screens: screens)
+        let attempt = Attempt(pid: app.processIdentifier, direction: direction, screens: screens)
         self.attempt = attempt
-        let timeout = DispatchWorkItem { [weak self] in self?.finish(attempt, message: "Не удалось вовремя получить активное окно") }
+        let timeout = DispatchWorkItem { [weak self] in self?.finish(attempt, message: "Не удалось вовремя получить активное окно", outcome: "contextTimeout") }
         attempt.preparationTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: timeout)
         read(attempt, operation: { $0.context(pid: attempt.pid, screens: screens) }) { context in
             attempt.preparationTimeout?.cancel(); attempt.preparationTimeout = nil
-            guard let context else { self.finish(attempt, message: "Это окно нельзя перенести; полноэкранные Spaces не перемещаются"); return }
+            guard let context else { self.finish(attempt, message: "Это окно нельзя перенести; полноэкранные Spaces не перемещаются", outcome: "windowUnavailable"); return }
+            attempt.expected = context.frame
             let decision = WindowTransferPlan.decide(window: context.frame, displays: screens.displays, direction: direction, canResize: context.canResize)
             switch decision {
-            case .noNeighbor: self.finish(attempt, message: "В этом направлении нет соседнего дисплея")
-            case .invalidGeometry: self.finish(attempt, message: "Не удалось определить положение окна и дисплеев")
-            case .resizeUnavailable: self.finish(attempt, message: "Это окно нельзя подогнать под соседний дисплей")
+            case .noNeighbor: self.finish(attempt, message: "В этом направлении нет соседнего дисплея", outcome: "noNeighbor")
+            case .invalidGeometry: self.finish(attempt, message: "Не удалось определить положение окна и дисплеев", outcome: "invalidGeometry")
+            case .resizeUnavailable: self.finish(attempt, message: "Это окно нельзя подогнать под соседний дисплей", outcome: "resizeUnavailable")
             case .move(let plan):
-                attempt.context = context; attempt.plan = plan; attempt.expected = context.frame
+                attempt.context = context; attempt.plan = plan
                 attempt.operations = WindowFrameOperation.sequence(from: context.frame, to: plan.frame)
                 self.writeNext(attempt)
             }
@@ -220,43 +236,122 @@ final class WindowMoveController {
             }
         }
     }
+    private func schedule(_ attempt: Attempt, after delay: Double, _ work: @escaping () -> Void) {
+        let item = DispatchWorkItem { [weak self] in
+            guard self?.attempt === attempt else { return }
+            work()
+        }
+        attempt.poll = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
     private func writeNext(_ attempt: Attempt) {
         guard valid(attempt), let context = attempt.context, let plan = attempt.plan else { cancel(); return }
-        while let first = attempt.operations.first, first.matches(attempt.expected) { attempt.operations.removeFirst() }
-        guard let operation = attempt.operations.first else {
-            finish(attempt, message: WindowTransferPlan.approximatelyEqual(attempt.expected, plan.frame) ? "Окно перенесено на соседний дисплей" : "Перенос окна: результат не подтверждён")
+        while let first = attempt.operations.first, first.isSatisfied(by: attempt.expected, acceptedOrigin: attempt.acceptedOrigin) {
+            attempt.operations.removeFirst()
+        }
+        guard let operation = attempt.operations.first else { complete(attempt, plan: plan); return }
+        guard ProcessInfo.processInfo.systemUptime < attempt.writeDeadline else {
+            finish(attempt, message: "Перенос окна: время ожидания истекло", outcome: "deadline"); return
+        }
+        // The application keeps constraining a resize to the previous display
+        // for a few milliseconds after the window changed displays.
+        if operation.grows(attempt.expected), attempt.changedDisplay, !attempt.settledForGrowth {
+            attempt.settledForGrowth = true
+            attempt.steps.append(["settleMS": Int(ConversionTiming.windowDisplaySettle * 1000)])
+            schedule(attempt, after: ConversionTiming.windowDisplaySettle) { self.writeNext(attempt) }
             return
         }
-        guard ProcessInfo.processInfo.systemUptime < attempt.writeDeadline else { finish(attempt, message: "Перенос окна: время ожидания истекло"); return }
         let expected = attempt.expected
         attempt.didIssueWrite = true
+        let issuedAt = ProcessInfo.processInfo.systemUptime
         read(attempt, operation: { $0.write(operation, context: context, expected: expected, screens: attempt.screens, cancellation: attempt.cancellation, deadline: attempt.writeDeadline) }) { issued in
-            guard issued else { self.finish(attempt, message: "Перенос окна: результат не подтверждён"); return }
-            let deadline = ProcessInfo.processInfo.systemUptime + 0.5
-            self.acknowledge(attempt, operation: operation, deadline: deadline)
+            guard issued else { self.finish(attempt, message: "Перенос окна: результат не подтверждён", outcome: "writeRefused"); return }
+            self.acknowledge(attempt, progress: WindowStepProgress(operation: operation, before: expected), issuedAt: issuedAt,
+                             deadline: ProcessInfo.processInfo.systemUptime + ConversionTiming.windowStepDeadline)
         }
     }
-    private func acknowledge(_ attempt: Attempt, operation: WindowFrameOperation, deadline: Double) {
+    private func acknowledge(_ attempt: Attempt, progress: WindowStepProgress, issuedAt: Double, deadline: Double) {
         guard valid(attempt), let context = attempt.context, let plan = attempt.plan else { cancel(); return }
-        guard ProcessInfo.processInfo.systemUptime < deadline else { finish(attempt, message: "Перенос окна: результат не подтверждён"); return }
         read(attempt, operation: { $0.read(context, screens: attempt.screens) }) { result in
-            guard ProcessInfo.processInfo.systemUptime < deadline else { self.finish(attempt, message: "Перенос окна: результат не подтверждён"); return }
+            var progress = progress
+            let now = ProcessInfo.processInfo.systemUptime
+            let state: WindowStepProgress.State
             switch result {
-            case .invalid: self.finish(attempt, message: "Перенос окна: результат не подтверждён")
-            case .frame(let frame) where operation.acknowledges(frame, previous: attempt.expected) && (attempt.operations.count > 1 || WindowTransferPlan.approximatelyEqual(frame, plan.frame)):
-                attempt.expected = frame; attempt.operations.removeFirst()
-                if attempt.operations.isEmpty { self.finish(attempt, message: "Окно перенесено на соседний дисплей") }
-                else { self.writeNext(attempt) }
-            case .busy, .frame:
-                let work = DispatchWorkItem { [weak self = self] in self?.acknowledge(attempt, operation: operation, deadline: deadline) }
-                attempt.poll = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: work)
+            case .invalid: self.finish(attempt, message: "Перенос окна: результат не подтверждён", outcome: "readInvalid"); return
+            case .busy: state = .waiting
+            case .frame(let frame): state = progress.observe(frame, at: now)
             }
+            let frame: CGRect
+            let kind: String
+            switch state {
+            case .waiting:
+                guard now < deadline else {
+                    self.record(attempt, progress.operation, result: "timeout", frame: nil, issuedAt: issuedAt)
+                    self.finish(attempt, message: "Перенос окна: результат не подтверждён", outcome: "stepTimeout"); return
+                }
+                self.schedule(attempt, after: ConversionTiming.windowPollInterval) {
+                    self.acknowledge(attempt, progress: progress, issuedAt: issuedAt, deadline: deadline)
+                }
+                return
+            case .applied(let value): frame = value; kind = "applied"
+            case .adjusted(let value): frame = value; kind = "adjusted"
+            case .unchanged(let value): frame = value; kind = "unchanged"
+            }
+            self.record(attempt, progress.operation, result: kind, frame: frame, issuedAt: issuedAt)
+            attempt.expected = frame
+            if case .position = progress.operation, attempt.acceptedOrigin == nil {
+                attempt.acceptedOrigin = frame.origin
+                attempt.changedDisplay = WindowTransferPlan.mainDisplay(of: frame, in: attempt.screens.displays)?.id != plan.sourceID
+            }
+            // A growth cut short right after a display change is issued once
+            // more after a longer settle; any other result is final.
+            if progress.operation.fallsShort(frame), progress.operation.grows(progress.before), attempt.changedDisplay, !attempt.repeatedGrowth {
+                attempt.repeatedGrowth = true
+                attempt.steps.append(["settleMS": Int(ConversionTiming.windowGrowthRepeatSettle * 1000)])
+                self.schedule(attempt, after: ConversionTiming.windowGrowthRepeatSettle) { self.writeNext(attempt) }
+                return
+            }
+            attempt.operations.removeFirst()
+            self.writeNext(attempt)
         }
     }
-    private func finish(_ attempt: Attempt, message: String) {
+    private func complete(_ attempt: Attempt, plan: WindowTransferPlan) {
+        switch WindowTransferOutcome.classify(final: attempt.expected, plan: plan, displays: attempt.screens.displays) {
+        case .moved: finish(attempt, message: "Окно перенесено на соседний дисплей", outcome: "moved")
+        case .adjusted: finish(attempt, message: "Окно перенесено; macOS или программа изменили его размер или положение", outcome: "adjusted")
+        case .unconfirmed: finish(attempt, message: "Перенос окна: результат не подтверждён", outcome: "unconfirmed")
+        }
+    }
+    private func record(_ attempt: Attempt, _ operation: WindowFrameOperation, result: String, frame: CGRect?, issuedAt: Double) {
+        var step: [String: Any] = ["result": result, "ms": Int((ProcessInfo.processInfo.systemUptime - issuedAt) * 1000)]
+        switch operation {
+        case .size(let size): step["size"] = [size.width, size.height]
+        case .position(let point): step["position"] = [point.x, point.y]
+        }
+        if let frame { step["frame"] = Self.numbers(frame) }
+        attempt.steps.append(step)
+    }
+    private static func numbers(_ rect: CGRect) -> [Double] { [rect.minX, rect.minY, rect.width, rect.height].map { Double($0) } }
+    private static func text(_ rect: CGRect) -> String {
+        String(format: "%.0f, %.0f, %.0f×%.0f", rect.minX, rect.minY, rect.width, rect.height)
+    }
+    private func finish(_ attempt: Attempt, message: String, outcome: String) {
         guard self.attempt === attempt else { return }
         attempt.cancellation.cancel(); attempt.poll?.cancel(); attempt.preparationTimeout?.cancel(); self.attempt = nil
+        // Geometry only: no window titles, application names or contents.
+        var report: [String: Any] = ["outcome": outcome, "direction": String(describing: attempt.direction),
+                                     "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - attempt.started) * 1000),
+                                     "displays": attempt.screens.displays.map { ["id": Int($0.id), "frame": Self.numbers($0.frame),
+                                                                                  "visible": Self.numbers($0.visibleFrame)] },
+                                     "steps": attempt.steps]
+        if let context = attempt.context { report["source"] = Self.numbers(context.frame) }
+        if let plan = attempt.plan {
+            report["plan"] = Self.numbers(plan.frame)
+            report["sourceDisplay"] = Int(plan.sourceID); report["destinationDisplay"] = Int(plan.destinationID)
+            report["final"] = Self.numbers(attempt.expected)
+            lastDetails = "Перенос окна: план \(Self.text(plan.frame)); итог \(Self.text(attempt.expected))"
+        } else { lastDetails = "" }
+        DiagnosticReports.shared.record("WindowMoveReport", report)
         lastResult = message; onResult?()
     }
     deinit { if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) } }

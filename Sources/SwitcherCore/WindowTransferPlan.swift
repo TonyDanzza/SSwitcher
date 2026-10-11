@@ -122,6 +122,27 @@ public struct WindowTransferPlan: Equatable {
         valid(a) && valid(b) && abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
             abs(a.maxX - b.maxX) <= tolerance && abs(a.maxY - b.maxY) <= tolerance
     }
+
+    /// The display holding the largest part of `frame`, or nil off screen.
+    public static func mainDisplay(of frame: CGRect, in displays: [WindowDisplay]) -> WindowDisplay? {
+        let ranked = displays.map { ($0, area(frame.intersection($0.frame))) }.filter { $0.1 > 0 }
+        return ranked.max { $0.1 == $1.1 ? $0.0.id > $1.0.id : $0.1 < $1.1 }?.0
+    }
+}
+
+/// The verified result of a whole transfer.
+public enum WindowTransferOutcome: Equatable {
+    /// Every edge is within `WindowTransferPlan.tileTolerance` of the plan.
+    case moved
+    /// The window is on the destination display, but macOS or the application
+    /// changed its size or position (minimum size, display constraints).
+    case adjusted
+    case unconfirmed
+
+    public static func classify(final: CGRect, plan: WindowTransferPlan, displays: [WindowDisplay]) -> Self {
+        if WindowTransferPlan.edgesMatch(final, plan.frame, tolerance: WindowTransferPlan.tileTolerance) { return .moved }
+        return WindowTransferPlan.mainDisplay(of: final, in: displays)?.id == plan.destinationID ? .adjusted : .unconfirmed
+    }
 }
 
 /// Carbon can repeat a pressed hotkey. Each press/release cycle dispatches once;
@@ -137,6 +158,10 @@ public struct WindowShortcutPressGate {
 /// Shrink on the source screen, move, then grow on the destination. AppKit
 /// may change an anchor during growth; one final position step can correct it.
 /// A step already satisfied by the acknowledged frame needs no setter.
+///
+/// Right after a window changes displays, its application still constrains
+/// resizing to the previous display for 10-20 ms (measured with TextEdit and
+/// Finder), so growth waits for a short settle; see the controller.
 public enum WindowFrameOperation: Equatable {
     case size(CGSize), position(CGPoint)
 
@@ -165,6 +190,61 @@ public enum WindowFrameOperation: Equatable {
         case .size: return true // A size setter can change the window's anchor.
         case .position: return abs(frame.width - previous.width) <= 1 && abs(frame.height - previous.height) <= 1
         }
+    }
+
+    /// Already satisfied, including a later position step whose origin macOS
+    /// already adjusted for an earlier one (for example a display constraint).
+    public func isSatisfied(by frame: CGRect, acceptedOrigin: CGPoint?) -> Bool {
+        if matches(frame) { return true }
+        guard case .position = self, let acceptedOrigin else { return false }
+        return abs(frame.minX - acceptedOrigin.x) <= 1 && abs(frame.minY - acceptedOrigin.y) <= 1
+    }
+
+    /// A size step that makes the window larger in either dimension.
+    public func grows(_ frame: CGRect) -> Bool {
+        guard case .size(let size) = self else { return false }
+        return size.width > frame.width + 1 || size.height > frame.height + 1
+    }
+
+    /// A size step whose result stayed smaller than requested.
+    public func fallsShort(_ frame: CGRect) -> Bool {
+        guard case .size(let size) = self else { return false }
+        return frame.width < size.width - 1 || frame.height < size.height - 1
+    }
+}
+
+/// Polled frames after one issued step. AppKit and the application may apply
+/// the step exactly, adjust it (display constraints, minimum sizes, size
+/// increments) or ignore it; a frame that stays the same decides which.
+public struct WindowStepProgress {
+    public enum State: Equatable { case waiting, applied(CGRect), adjusted(CGRect), unchanged(CGRect) }
+    /// A changed frame that holds this long is the application's answer.
+    public static let adjustedStability = 0.04
+    /// A step with no visible effect is accepted only after a longer quiet time.
+    public static let unchangedStability = 0.2
+    public let operation: WindowFrameOperation
+    public let before: CGRect
+    private var last: CGRect?
+    private var stableSince = 0.0
+
+    public init(operation: WindowFrameOperation, before: CGRect) {
+        self.operation = operation; self.before = before
+    }
+
+    public mutating func observe(_ frame: CGRect, at time: Double) -> State {
+        if last.map({ WindowTransferPlan.edgesMatch($0, frame, tolerance: 0.5) }) != true {
+            last = frame; stableSince = time
+        }
+        if operation.acknowledges(frame, previous: before) { return .applied(frame) }
+        let stable = time - stableSince
+        let changed: Bool
+        switch operation {
+        case .size: changed = abs(frame.width - before.width) > 0.5 || abs(frame.height - before.height) > 0.5
+        case .position: changed = abs(frame.minX - before.minX) > 0.5 || abs(frame.minY - before.minY) > 0.5
+        }
+        if changed, stable >= Self.adjustedStability { return .adjusted(frame) }
+        if !changed, stable >= Self.unchangedStability { return .unchanged(frame) }
+        return .waiting
     }
 }
 

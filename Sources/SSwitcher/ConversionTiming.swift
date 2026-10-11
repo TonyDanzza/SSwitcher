@@ -27,4 +27,10 @@ enum ConversionTiming {
     static let nativeVisualCommitSettle = 0.1
     static let nativeVisualWatchdog = 1.0
     static let nativeVisualEarlyClaim = 0.4
+    // Window transfer: an application constrains a resize to the previous
+    // display for 10-20 ms after its window changed displays (TextEdit, Finder).
+    static let windowDisplaySettle = 0.05
+    static let windowGrowthRepeatSettle = 0.15
+    static let windowStepDeadline = 0.5
+    static let windowPollInterval = 0.02
 }

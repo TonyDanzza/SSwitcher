@@ -349,6 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.lastResult,
                     self.editor.diagnosticDetails,
                     self.windowMoves.lastResult,
+                    self.windowMoves.lastDetails,
                     self.editor.overlay.lastStatus,
                     self.editor.performance.diagnosticStatus,
                     self.nativeServices.conversionStatus
