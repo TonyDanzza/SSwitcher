@@ -27,8 +27,9 @@ Electron Accessibility preparation is bounded and cached; enabling it does not i
 
 MAX does not expose its composer as a usable Accessibility text editor in the tested version. The app uses the system Services protocol with a dedicated packet:
 
-- Manual selection: discover the exact enabled conversion leaf, validate original app/window and perform its native action once.
-- Cursor word: obtain a native right-boundary response. Positive text and event delivery are separate receipts. An empty response needs the return-only service barrier and a clean native menu-capability result; a missing callback is not an end-of-text proof.
+- Validate original app/window and menu discovery, then issue window-bound selection and return-only Services requests. Cached menu enablement does not decide whether text is selected: MAX can leave a conversion item enabled after collapsing selection.
+- A positive selection response and event delivery finish the selection conversion. Do not wait for a subsequent service that Qt can drop after committing a response. With no response publication, only an actual return-only callback plus delivery permits the word branch; a timeout or refused publication never does.
+- Cursor word: after the native requestor-return settle, obtain a native right-boundary response. Positive text and event delivery are separate receipts. An empty response needs the return-only service barrier; the stale menu is not used as boundary evidence.
 - After the bounded requestor-return settle, select the word once and convert its actual packet in the same callback. Do not re-read a cached candidate and issue a second conversion action.
 - Publish one response after source, foreground, input-generation, secure-input and deadline checks. No remote AX call runs inside the synchronous Services callback.
 

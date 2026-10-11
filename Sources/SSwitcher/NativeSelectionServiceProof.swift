@@ -92,26 +92,16 @@ final class NativeSelectionServiceProof {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == epoch, self.automatic === request else { return }
                 self.recordMenu(result.report)
-                guard let item = result.item else {
-                    guard result.hasNoSelectionCapability else {
-                        self.finishAutomatic(.unavailable); return
-                    }
-                    self.startWord(request, deadline: deadline, epoch: epoch)
-                    return
+                // AXEnabled can remain true after a Services replacement has
+                // collapsed selection. The responder's queued callbacks,
+                // rather than that cached value, decide the current scope.
+                guard result.item != nil || result.hasNoSelectionCapability else {
+                    self.finishAutomatic(.unavailable); return
                 }
                 guard request.valid(), !deadline.expired(at: ProcessInfo.processInfo.systemUptime),
                       self.foregroundMatches(identity), self.ordinarySourceID() == identity.sourceID,
                       !IsSecureEventInputEnabled() else { self.finishAutomatic(.cancelled); return }
-                self.menuWorker.async { [weak self] in
-                    let reply = NativeServiceMenuResolver.press(item, pid: identity.pid, window: identity.window,
-                                                               cancellation: cancellation)
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, self.generation == epoch, self.automatic === request else { return }
-                        request.state.pressed(reply == .success)
-                        if reply == nil { self.finishAutomatic(request.state.stopped(cancelled: cancellation.isCancelled)); return }
-                        if let outcome = request.state.completed { self.finishAutomatic(outcome) }
-                    }
-                }
+                self.startWord(request, deadline: deadline, epoch: epoch)
             }
         }
     }
@@ -136,6 +126,25 @@ final class NativeSelectionServiceProof {
                 return capture.identity.map { $0.pid == identity.pid && $0.sourceID == identity.sourceID &&
                     CFEqual($0.window, identity.window) } == true
 
+            }, prepareWord: { [weak self, weak request] resume in
+                guard let self, let request, self.generation == epoch, self.automatic === request else { return }
+                // Capture only when navigation will be needed, and never make
+                // remote AX calls inside a synchronous Services callback.
+                self.menuWorker.async { [weak self, weak request] in
+                    guard let self, let request else { return }
+                    let bounds = NativeServiceMenuResolver.windowBounds(identity.window, pid: identity.pid)
+                    DispatchQueue.main.async { [weak self, weak request] in
+                        guard let self, let request, self.generation == epoch, self.automatic === request else { return }
+                        self.visualShield.prepare(bounds: bounds, valid: { [weak self, weak request] in
+                            guard let self, let request else { return false }
+                            return self.generation == epoch && self.automatic === request && localReady()
+                        }) { [weak self, weak request] in
+                            guard let self, let request, self.generation == epoch, self.automatic === request else { return }
+                            guard localReady() else { self.finishAutomatic(.cancelled); return }
+                            resume()
+                        }
+                    }
+                }
             }) { [weak self, weak request] ready, reason in
                 guard let self, let request, self.generation == epoch, self.automatic === request else { return }
                 guard ready else {
@@ -147,23 +156,7 @@ final class NativeSelectionServiceProof {
             }
         request.word = word
         record(["stage": "nativeWordBoundary", "automatic": true])
-        // Resolve window geometry outside a synchronous Services callback.
-        // No text-field or guessed composer coordinates are needed.
-        menuWorker.async { [weak self, weak request] in
-            guard let self, let request else { return }
-            let bounds = NativeServiceMenuResolver.windowBounds(identity.window, pid: identity.pid)
-            DispatchQueue.main.async { [weak self, weak request] in
-                guard let self, let request, self.generation == epoch, self.automatic === request else { return }
-                self.visualShield.prepare(bounds: bounds, valid: { [weak self, weak request] in
-                    guard let self, let request else { return false }
-                    return self.generation == epoch && self.automatic === request && localReady()
-                }) { [weak self, weak request] in
-                    guard let self, let request, self.generation == epoch, self.automatic === request else { return }
-                    guard localReady() else { self.finishAutomatic(.cancelled); return }
-                    word.start()
-                }
-            }
-        }
+        word.start()
     }
 
     func cancelVisualShield() { visualShield.cancel() }

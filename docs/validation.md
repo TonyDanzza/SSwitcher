@@ -1,8 +1,8 @@
-# Validation — 0.1.22 / build 157
+# Validation — 0.1.22 / build 160
 
 ## Automated checks
 
-On 11 October 2026, `swift test` ran **207 tests with zero failures**, including the final build 157 source. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
+On 11 October 2026, `swift test` ran **212 tests with zero failures**, including the final build 160 source. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
 
 Build 151 records a successful input-source selection only after reading back the requested source ID. A delayed or duplicate notification of that same selection no longer resets the next gesture or clears burst protection. Tests cover a notice between the two Shift taps, real external source changes, failed selection and unavailable source identity. This addresses a cancellation race; it does not establish that this race caused every reported MAX failure.
 
@@ -11,6 +11,12 @@ Core tests cover gesture admission, burst handling, UTF-16 ranges, coherent sele
 Build 153 posts MAX navigation, its dependent Services shortcuts and cursor restoration through one session route. The earlier split between process-directed arrows and session-directed Services did not establish their relative arrival order. A native window-bound session navigation check showed that MAX accepted this route. Callback outcomes are retained separately from the final aggregate report, without raw text, so a refusal is no longer overwritten by a later dispatch result. This removes an ordering risk; the exact guard behind the earlier intermittent failure was not recovered.
 
 ## Observed MAX behavior
+
+Build 157 reproduced another selected-phrase failure: converting all of `ghbdtn ghbdtn` succeeded, but a prompt second double Shift left the last word unchanged. The menu report still advertised an enabled conversion item; its native action was accepted without a replacement callback. Scope dispatch now uses the responder's Services callbacks rather than that cached item. Five core tests cover positive reply/delivery ordering, missing callbacks, the empty-response barrier, refusal and failed delivery.
+
+Build 160 passed the same two-gesture sequence on the MacBook display with both 150 ms and 600 ms additional gaps in the test driver. Actual composer crops showed `ghbdtn ghbdtn` → `привет привет` → `привет ghbdtn`. A subsequent gesture returned the last word to Russian. Ordinary physical Space/A input appended text after conversion; an inside-word gesture preserved the text and refused conversion. The test draft and end caret were restored. No messages were sent; general pasteboard metadata was unchanged and modifier checks found no held keys.
+
+The empty-selection probe reuses the 250 ms native return settle before a dependent boundary request. Without it, the boundary callback could be lost even after successful delivery. Individual word transaction reports were roughly 627–646 ms; these exclude initial gesture/menu admission and are not compositor measurements. This fixes the reproduced functional failure, not replacement latency or complete visual invisibility.
 
 On build 151, converting a selected two-word phrase succeeded, but the next cursor-word attempt left the last word selected and unchanged. The aggregate report did not preserve the callback rejection reason.
 
@@ -40,7 +46,7 @@ Individual visual-shield lifetimes measured roughly 0.4–0.5 seconds. The 250 m
 ## Remaining issues
 
 - MAX uses transient native selection. With screen capture unavailable, timed out, or cancelled by input, it can flash before replacement.
-- The selected-phrase → cursor-word transition passed the bounded build 153 checks, but intermittent failures are not ruled out.
+- The selected-phrase → cursor-word transition passed the build 160 checks after the reproduced stale-menu failure was fixed, but intermittent failures are not ruled out.
 - MAX Services receipts prove response publication and native action acceptance, not whole-document or cursor verification through Accessibility.
 - The browser, Notes and Figma routes were not all re-tested for this source snapshot.
 

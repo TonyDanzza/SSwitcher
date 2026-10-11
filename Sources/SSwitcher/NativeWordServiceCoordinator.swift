@@ -2,8 +2,8 @@ import AppKit
 import Carbon
 import SwitcherCore
 
-/// Native MAX word transaction. A word and right-boundary probe prove scope;
-/// the final Services request must contain only that word.
+/// Native MAX transaction: ask the current responder about selection first,
+/// then prove the right boundary before selecting and replacing a word.
 /// No ordinary clipboard, modifier presses or text injection.
 final class NativeWordServiceCoordinator {
     private final class Packet {
@@ -18,29 +18,80 @@ final class NativeWordServiceCoordinator {
     private let window: AXUIElement
     private let valid: () -> Bool
     private let beforeKeys: () -> Bool
+    private let prepareWord: (@escaping () -> Void) -> Void
     private let completion: (Bool, String) -> Void
     private var packet: Packet?
     private var timeout: DispatchWorkItem?
     private var finished = false
     private var committing = false
     private var commitState = NativeServiceDispatchState()
+    private var selectionState = NativeSelectionDispatchState()
     private var wordIssuedAt: Double?
     private var modifierWait: ModifierReleaseReadiness?
     private var plan: NativeWordBoundaryPlan?
-    private let menuWorker = DispatchQueue(label: "SSwitcher.native-word-boundary", qos: .userInitiated)
-    private let menuCancellation = AttemptCancellation()
     private let started = ProcessInfo.processInfo.systemUptime
     private var phase = "created"
     private(set) var status = "Проверяю слово MAX"
 
     init(pid: pid_t, window: AXUIElement, valid: @escaping () -> Bool,
          beforeKeys: @escaping () -> Bool,
+         prepareWord: @escaping (@escaping () -> Void) -> Void,
          completion: @escaping (Bool, String) -> Void) {
         self.pid = pid; self.window = window; self.valid = valid
-        self.beforeKeys = beforeKeys; self.completion = completion
+        self.beforeKeys = beforeKeys; self.prepareWord = prepareWord; self.completion = completion
     }
 
     func start() {
+        guard live else { return }
+        guard waitForModifiers({ [weak self] in self?.start() }) else { return }
+        guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
+              let raw = NativeServiceBarrierEvents.batch([
+                (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
+              ], appendProbe: false),
+              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
+            fail("Нативная проверка выделения MAX недоступна"); return
+        }
+        phase = "selection"
+        committing = true
+        record("selectionIssued")
+        armTimeout("MAX не подтвердил завершение запроса выделения")
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false,
+            postingTap: .cgSessionEventTap) { [weak self] delivered in
+                guard let self, self.live, self.phase == "selection" else { return }
+                self.selectionState.delivery(delivered)
+                self.completeSelection()
+            }
+    }
+
+    private func completeSelection() {
+        guard live, phase == "selection", let result = selectionState.result else { return }
+        timeout?.cancel(); timeout = nil
+        switch result {
+        case .submitted:
+            record("selectionSubmitted")
+            completion(true, "Выделение передано нативному редактору MAX")
+        case .rejected:
+            fail("Нативная замена выделения MAX не подтверждена")
+        case .empty:
+            // Both queued requests have returned without any replacement
+            // publication. A stale AXEnabled menu value is not consulted.
+            committing = false
+            phase = "preparingWord"
+            record("selectionEmpty")
+            // The provider callback precedes Qt's return to its event loop.
+            // Reuse the native return settle before issuing another service;
+            // a delivery receipt alone cannot pace two responder requests.
+            DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeServiceReturnSettle) { [weak self] in
+                guard let self, self.live else { return }
+                self.prepareWord { [weak self] in
+                    guard let self, self.live else { return }
+                    self.startBoundary()
+                }
+            }
+        }
+    }
+
+    private func startBoundary() {
         phase = "boundary"
         // The return-only service is an actual responder-loop barrier after
         // the selected-text request, including at an empty EOF caret. A
@@ -88,15 +139,19 @@ final class NativeWordServiceCoordinator {
             }
     }
 
-    var isAwaitingConversion: Bool { live && committing && phase == "wordCommit" }
+    var isAwaitingConversion: Bool { live && committing && (phase == "selection" || phase == "wordCommit") }
 
     func permitsCommit(_ text: String) -> Bool {
-        live && committing && phase == "wordCommit" &&
+        if live, committing, phase == "selection" { return NativeServicePayload.accepts(text) }
+        return live && committing && phase == "wordCommit" &&
             NativeWordBoundaryPlan(selection: text) != nil &&
             (plan == nil || plan?.matches(text) == true)
     }
 
     func prepareCommit(_ text: String) -> InputSources.Conversion? {
+        if live, committing, phase == "selection", NativeServicePayload.accepts(text) {
+            return InputSources.prepare(text)
+        }
         guard permitsCommit(text), let exact = NativeWordBoundaryPlan(selection: text),
               let conversion = InputSources.prepare(exact.word) else { return nil }
         plan = exact
@@ -108,6 +163,11 @@ final class NativeWordServiceCoordinator {
 
     func didPublish(_ success: Bool) {
         guard live, committing else { return }
+        if phase == "selection" {
+            selectionState.published(success)
+            RunLoop.main.perform(inModes: [.common]) { [weak self] in self?.completeSelection() }
+            return
+        }
         commitState.published(success)
         // Let the provider callback return before changing ordinary sources.
         RunLoop.main.perform(inModes: [.common]) { [weak self] in self?.completeCommit() }
@@ -189,6 +249,11 @@ final class NativeWordServiceCoordinator {
     /// Called only by the native return-only requestor after the preceding
     /// read service. No AX IPC is made while that responder waits on us.
     func receiveBarrier() {
+        if live, phase == "selection" {
+            selectionState.receiveBarrier()
+            RunLoop.main.perform(inModes: [.common]) { [weak self] in self?.completeSelection() }
+            return
+        }
         guard live, phase == "boundary", let ticket = packet else { return }
         ticket.state.receiveBarrier()
         RunLoop.main.perform(inModes: [.common]) { [weak self, weak ticket] in
@@ -224,18 +289,8 @@ final class NativeWordServiceCoordinator {
             guard let noSelection = ticket.noSelection, self.beforeKeys() else {
                 self.fail("MAX не предоставил нативный текст"); return
             }
-            self.menuWorker.async { [weak self] in
-                guard let self else { return }
-                let result = NativeServiceMenuResolver.inspect(pid: self.pid, cancellation: self.menuCancellation)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.live else { return }
-                    guard self.beforeKeys(), result.hasNoSelectionCapability else {
-                        self.fail("MAX не подтвердил границу слова"); return
-                    }
-                    self.record("nativeEmptyBoundary")
-                    noSelection()
-                }
-            }
+            self.record("nativeEmptyBoundary")
+            noSelection()
         }
     }
 
@@ -275,7 +330,7 @@ final class NativeWordServiceCoordinator {
     func cancel() {
         guard !finished else { return }
         if phase != "failed" { record(committing ? "closed" : "cancelled") }
-        finished = true; menuCancellation.cancel(); timeout?.cancel(); timeout = nil
+        finished = true; timeout?.cancel(); timeout = nil
         KeyboardEvents.cancelDelivery()
         packet = nil; plan = nil; modifierWait = nil
     }
