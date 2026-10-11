@@ -27,9 +27,10 @@ Electron Accessibility preparation is bounded and cached; enabling it does not i
 
 MAX does not expose its composer as a usable Accessibility text editor in the tested version. The app uses the system Services protocol with a dedicated packet:
 
-- Validate original app/window and menu discovery, then issue window-bound selection and return-only Services requests. Cached menu enablement does not decide whether text is selected: MAX can leave a conversion item enabled after collapsing selection.
+- Validate the original app/window, then issue window-bound selection and return-only Services requests. Cached menu enablement does not decide whether text is selected: MAX can leave a conversion item enabled after collapsing selection.
 - A positive selection response and event delivery finish the selection conversion. Do not wait for a subsequent service that Qt can drop after committing a response. With no response publication, only an actual return-only callback plus delivery permits the word branch; a timeout or refused publication never does.
-- Cursor word: after the native requestor-return settle, obtain a native right-boundary response. Positive text and event delivery are separate receipts. An empty response needs the return-only service barrier; the stale menu is not used as boundary evidence.
+- Menu inspection is limited to explicit diagnostics. Static Services are registered at launch; actual responder callbacks establish capability on the conversion path. Missing callbacks still stop the attempt at its deadline.
+- Cursor word: prepare the visual shield during the native requestor-return settle, then obtain a native right-boundary response. Positive text and event delivery are separate receipts. An empty response needs the return-only service barrier; the stale menu is not used as boundary evidence.
 - After the bounded requestor-return settle, select the word once and convert its actual packet in the same callback. Do not re-read a cached candidate and issue a second conversion action.
 - Publish one response after source, foreground, input-generation, secure-input and deadline checks. No remote AX call runs inside the synchronous Services callback.
 

@@ -83,27 +83,12 @@ final class NativeSelectionServiceProof {
         automatic = request
         grant = Grant(identity: identity, deadline: deadline)
         let epoch = generation
-        let cancellation = AttemptCancellation()
-        menuCancellation = cancellation
-        record(["stage": "nativeMenuDiscovery", "automatic": true, "windowProvenAtArm": true])
+        record(["stage": "nativeResponderRequest", "automatic": true, "windowProvenAtArm": true])
         expire(after: max(0, deadline.expiresAt - ProcessInfo.processInfo.systemUptime), epoch: epoch)
-        menuWorker.async { [weak self] in
-            let result = NativeServiceMenuResolver.inspect(pid: identity.pid, cancellation: cancellation)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == epoch, self.automatic === request else { return }
-                self.recordMenu(result.report)
-                // AXEnabled can remain true after a Services replacement has
-                // collapsed selection. The responder's queued callbacks,
-                // rather than that cached value, decide the current scope.
-                guard result.item != nil || result.hasNoSelectionCapability else {
-                    self.finishAutomatic(.unavailable); return
-                }
-                guard request.valid(), !deadline.expired(at: ProcessInfo.processInfo.systemUptime),
-                      self.foregroundMatches(identity), self.ordinarySourceID() == identity.sourceID,
-                      !IsSecureEventInputEnabled() else { self.finishAutomatic(.cancelled); return }
-                self.startWord(request, deadline: deadline, epoch: epoch)
-            }
-        }
+        // Our static Services are registered at launch. Their actual callbacks
+        // prove current capability; scanning cached menu leaves adds IPC but
+        // no editor authority. Missing callbacks still fail at the deadline.
+        startWord(request, deadline: deadline, epoch: epoch)
     }
 
     private func startWord(_ request: Automatic, deadline: ReadinessDeadline, epoch: Int) {

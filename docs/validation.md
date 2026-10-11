@@ -1,8 +1,8 @@
-# Validation — 0.1.22 / build 160
+# Validation — 0.1.22 / build 164
 
 ## Automated checks
 
-On 11 October 2026, `swift test` ran **212 tests with zero failures**, including the final build 160 source. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
+On 11 October 2026, `swift test` ran **212 tests with zero failures**, including the final build 164 source. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
 
 Build 151 records a successful input-source selection only after reading back the requested source ID. A delayed or duplicate notification of that same selection no longer resets the next gesture or clears burst protection. Tests cover a notice between the two Shift taps, real external source changes, failed selection and unavailable source identity. This addresses a cancellation race; it does not establish that this race caused every reported MAX failure.
 
@@ -11,6 +11,12 @@ Core tests cover gesture admission, burst handling, UTF-16 ranges, coherent sele
 Build 153 posts MAX navigation, its dependent Services shortcuts and cursor restoration through one session route. The earlier split between process-directed arrows and session-directed Services did not establish their relative arrival order. A native window-bound session navigation check showed that MAX accepted this route. Callback outcomes are retained separately from the final aggregate report, without raw text, so a refusal is no longer overwritten by a later dispatch result. This removes an ordering risk; the exact guard behind the earlier intermittent failure was not recovered.
 
 ## Observed MAX behavior
+
+Build 164 removes the synchronous menu-discovery dependency from normal MAX conversion. The registered responder callbacks retain scope authority; menu inspection remains available for explicit diagnostics. Visual capture/presentation now overlaps the first 250 ms requestor-return settle rather than following it. Both readiness conditions must complete before navigation. The native service settle remains 250 ms: a 50 ms candidate lost the word request and was not retained. The post-submission visual cover is 100 ms to cover a sampled selection flash seen with 50 ms.
+
+On the MacBook display, the final build passed selected phrase → last word with a 150 ms additional driver gap, reverse conversion, ordinary Space/A input, and inside-word refusal followed by recovery. Actual composer crops were inspected. The original test draft and end caret were restored; no messages were sent. General pasteboard change count/type count stayed unchanged and no held modifier keys were found.
+
+Two individual recordings of the same Russian-to-English last-word conversion showed the first changed frame approximately 930 ms after the second Shift release on build 160 and 850 ms on build 164. The preceding old-text frames were one 60 Hz frame earlier. This is a small observed improvement, not median/p95 data or a guarantee of imperceptible replacement. Recordings interrupted by focus/input changes were excluded. Local recordings, screenshots and test scripts are not part of the repository or normal application behavior.
 
 Build 157 reproduced another selected-phrase failure: converting all of `ghbdtn ghbdtn` succeeded, but a prompt second double Shift left the last word unchanged. The menu report still advertised an enabled conversion item; its native action was accepted without a replacement callback. Scope dispatch now uses the responder's Services callbacks rather than that cached item. Five core tests cover positive reply/delivery ordering, missing callbacks, the empty-response barrier, refusal and failed delivery.
 

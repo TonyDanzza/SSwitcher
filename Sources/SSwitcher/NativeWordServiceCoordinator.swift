@@ -78,12 +78,13 @@ final class NativeWordServiceCoordinator {
             committing = false
             phase = "preparingWord"
             record("selectionEmpty")
-            // The provider callback precedes Qt's return to its event loop.
-            // Reuse the native return settle before issuing another service;
-            // a delivery receipt alone cannot pace two responder requests.
-            DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeServiceReturnSettle) { [weak self] in
+            // Capture does not navigate or invoke another service. Prepare it
+            // during the requestor-return settle, then wait only the remainder
+            // before navigation. Both prerequisites must finish first.
+            let readyAt = DispatchTime.now() + ConversionTiming.nativeServiceReturnSettle
+            prepareWord { [weak self] in
                 guard let self, self.live else { return }
-                self.prepareWord { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: readyAt) { [weak self] in
                     guard let self, self.live else { return }
                     self.startBoundary()
                 }
