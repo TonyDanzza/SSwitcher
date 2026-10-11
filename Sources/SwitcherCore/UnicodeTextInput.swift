@@ -94,26 +94,34 @@ public struct UnicodeTextInput {
 
     /// All text events are created successfully before preparing deletion.
     /// Word deletion and its first text pair share one batch, so cancellation
-    /// cannot interrupt them by stopping a later unposted deletion-only batch.
-    public func makeEventBatches(deletingCharacters: Int = 0) -> [[CGEvent]]? {
-        guard deletingCharacters >= 0, let textEvents = makeEvents(), !textEvents.isEmpty else { return nil }
+    /// cannot interrupt them by stopping a later unposted deletion-only batch,
+    /// and the editor applies deletion and insertion in one event-loop turn.
+    /// `asOneWord` replaces the Backspaces with one Option+Backspace; the
+    /// caller must know the editor's word boundary is the deleted text's start.
+    public func makeEventBatches(deletingCharacters: Int = 0, asOneWord: Bool = false) -> [[CGEvent]]? {
+        guard deletingCharacters >= 0, !asOneWord || deletingCharacters > 0,
+              let textEvents = makeEvents(), !textEvents.isEmpty else { return nil }
         var batches = stride(from: 0, to: textEvents.count, by: 2).map { Array(textEvents[$0..<($0 + 2)]) }
-        if deletingCharacters > 0 {
-            guard let source = SyntheticKeyboardSource.make() else { return nil }
-            source.userData = KeyboardEventDelivery.sourceMarker
-            var initial: [CGEvent] = []
-            for _ in 0..<deletingCharacters {
-                for isDown in [true, false] {
-                    guard let event = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: isDown) else { return nil }
-                    event.flags = []
-                    event.setIntegerValueField(.eventSourceUserData, value: KeyboardEventDelivery.sourceMarker)
-                    initial.append(event)
-                }
-            }
-            initial.append(contentsOf: batches[0])
-            batches[0] = initial
+        var initial: [CGEvent] = []
+        for _ in 0..<(asOneWord ? 1 : deletingCharacters) {
+            guard let pair = Self.deletionPair(flags: asOneWord ? .maskAlternate : []) else { return nil }
+            initial.append(contentsOf: pair)
         }
+        batches[0] = initial + batches[0]
         return batches
+    }
+
+    private static func deletionPair(flags: CGEventFlags = []) -> [CGEvent]? {
+        guard let source = SyntheticKeyboardSource.make() else { return nil }
+        source.userData = KeyboardEventDelivery.sourceMarker
+        var pair: [CGEvent] = []
+        for isDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: isDown) else { return nil }
+            event.flags = isDown ? flags : []
+            event.setIntegerValueField(.eventSourceUserData, value: KeyboardEventDelivery.sourceMarker)
+            pair.append(event)
+        }
+        return pair
     }
 
     private static func matches(_ event: CGEvent, units: [UniChar]) -> Bool {

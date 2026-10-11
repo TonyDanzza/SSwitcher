@@ -5,6 +5,7 @@
 - `SwitcherCore`: deterministic gesture state, UTF-16 conversion plans, packet and delivery validation, cancellation deadlines, window geometry. Independent of the app's UI.
 - `KeyboardMonitor`: listening event tap, physical modifier tracking, input generations, double-Shift admission and burst handling.
 - `ConversionCoordinator` and `AXClient`: ordinary editor discovery, coherent text/range evidence, one replacement and document/cursor verification.
+- `TypedWordTracker`: in-memory characters typed since the caret last moved, used only while MAX is frontmost.
 - `NativeSelectionServiceProof`, `NativeWordServiceCoordinator` and `NativeServiceDiagnostic`: the MAX Services transaction and explicitly armed diagnostics.
 - `WindowMoveController`: directional window transfer using Accessibility; `WindowMoveHotKeys` owns the Carbon shortcut registrations.
 - `DiagnosticsWindow`, `PerformanceRecorder` and `ReplacementOverlay`: status, bounded measurements and an optional visual transition for editors with reliable geometry.
@@ -23,7 +24,15 @@ Word replacement is allowed only when the cursor is immediately after the last c
 
 Electron Accessibility preparation is bounded and cached; enabling it does not itself prove a usable editor. Spotlight has a narrowly verified search-field scope because the foreground application can remain Finder while the search field owns input.
 
-## MAX transaction
+## MAX freshly typed word
+
+While MAX is frontmost, the listening tap records the characters of ordinary key presses since the caret last moved. Clicks, navigation and function keys, Command/Control/Option shortcuts, Return, Tab, Escape, app activation, tap interruption and Backspace across a space forget the run. The last case exists because MAX autocorrects the previous word when a space is typed. Only text after the last typed space is a candidate; a run longer than one 64-character word is unknown.
+
+A double Shift with a known candidate converts it without selection, Services, Accessibility or clipboard: one prepared batch of exactly as many Backspaces as typed characters, followed by the Unicode text event, posted through the session and paced by MAX's own key-up receipt. A word of letters preceded by a typed space uses one Option+Backspace instead, which MAX applied in the same frame as the insertion. Composed or astral characters, missing layouts or posting permission fall back to the Services transaction before any key is sent. After delivery the tracker records the converted text, so another gesture converts it back.
+
+The word is what the user typed, not a proven document state: after a click it may continue an existing word, and only the typed part is replaced. An editor that rewrites text without a key event (autocompletion) can make the run stale. Delivery receipts do not prove MAX handled the events.
+
+## MAX Services transaction
 
 MAX does not expose its composer as a usable Accessibility text editor in the tested version. The app uses the system Services protocol with a dedicated packet:
 

@@ -43,3 +43,7 @@ It also requires reliable knowledge of the complete current word and caret. Reme
 Qt's Cocoa bridge applies a native `replacementRange` through one input-method commit inside the receiving text client. This is the relevant single-edit mechanism, but a separate process cannot obtain that client merely by observing CGEvents. Services supplies the actual selection instead. Shorter service waits, a snapshot cover, and faster key posting do not create a remote range-editing API.
 
 See [architecture.md](architecture.md) for the implemented route and [validation.md](validation.md) for tested behavior and open issues.
+
+## Shipped tracked-word route — build 167
+
+The user accepted Caramba-style retyping for a freshly typed word. Build 167 tracks typed characters only while MAX is frontmost and sends one batch: exact Backspaces (or one Option+Backspace for a letters-only word after a typed space) followed by the Unicode payload. Plain CGEvents with an explicit Unicode string were applied correctly in twelve consecutive single-batch trials, unlike the earlier window-framed burst. Option+Backspace with insertion changed the word in one 60 Hz frame; the Backspace batch showed one intermediate frame. Words whose characters were not typed since the last caret movement still use Services. See [validation.md](validation.md).

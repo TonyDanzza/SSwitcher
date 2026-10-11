@@ -1,3 +1,22 @@
+# Validation — 0.1.23 / build 167
+
+## Freshly typed MAX word — builds 165–167
+
+On 11 October 2026, `swift test` ran **227 tests with zero failures**, including tracker and event-batch tests. The signed release build was installed and its signature checked.
+
+Checks used ordinary key events in an unsent MAX draft on the MacBook display; no messages were sent and the observed draft was restored afterwards.
+
+- Letters after a typed space (`привет` ↔ `ghbdtn`, `оберем` → `j,thtv`) converted in both directions with Option+Backspace (checked on interim build 165; this path is unchanged in 166); reports 102–145 ms from the second Shift release to delivery.
+- Words with a comma or digit converted with exact Backspaces: `j,thtv` → `оберем` on build 165 (one Backspace per receipt), `привет1` ↔ `ghbdtn1` on build 166 (one batch); 112–151 ms.
+- Typing after conversion appended to the converted word; the next gesture converted the extended word.
+- After MAX regained focus, the run was forgotten and the gesture used the Services path as designed.
+- 60 Hz composer recordings: the Option+Backspace path went from the old to the new word in one frame, with no selection. The Backspace path showed one intermediate frame missing one character, then the new word, about 190 ms after the release. An earlier per-character receipt-paced variant showed three intermediate frames and was replaced.
+- Twelve consecutive single-batch Backspace + Unicode replacements left the expected text. The earlier failed unpaced experiment used window-framed events re-created from `NSEvent`; the plain CGEvents used now were not observed to lose keys. This is a bounded fixture, not proof for every system load.
+
+Final build 167 check: `ghbdtn` → `привет` with Option+Backspace in 127 ms; the draft was restored.
+
+Caramba Switcher Pro was started once for comparison but did not react in MAX in this setup (it has no saved configuration); no permissions were changed, so no comparison is claimed.
+
 # Validation — 0.1.22 / build 164
 
 ## Automated checks

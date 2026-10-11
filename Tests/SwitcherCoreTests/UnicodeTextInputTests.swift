@@ -135,6 +135,21 @@ final class UnicodeTextInputTests: XCTestCase {
         }
     }
 
+    func testOneWordDeletionSharesTheFirstTextBatch() throws {
+        let input = try XCTUnwrap(UnicodeTextInput(text: "ghbdtn"))
+        let batches = try XCTUnwrap(input.makeEventBatches(deletingCharacters: 6, asOneWord: true))
+        XCTAssertEqual(batches.count, 1)
+        XCTAssertEqual(batches[0].count, 4)
+        XCTAssertEqual(batches[0][0].getIntegerValueField(.keyboardEventKeycode), 51)
+        XCTAssertEqual(batches[0][0].flags, .maskAlternate)
+        XCTAssertEqual(batches[0][1].flags, [])
+        XCTAssertEqual(try unicodeText(in: batches[0][2]), "ghbdtn")
+        for event in batches[0] {
+            XCTAssertEqual(try XCTUnwrap(CGEventSource(event: event)).userData, KeyboardEventDelivery.sourceMarker)
+        }
+        XCTAssertNil(input.makeEventBatches(deletingCharacters: 0, asOneWord: true))
+    }
+
     private func unicodeText(in event: CGEvent) throws -> String {
         var count = 0
         event.keyboardGetUnicodeString(maxStringLength: 0, actualStringLength: &count, unicodeString: nil)

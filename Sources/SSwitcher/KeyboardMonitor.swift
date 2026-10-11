@@ -22,6 +22,13 @@ final class KeyboardMonitor {
     private(set) var doubleShiftCount = 0
     private(set) var syntheticEventCount = 0
     private var detector = DoubleShiftDetector()
+    private var typedWord = TypedWordTracker()
+    /// Typed characters are remembered only while an editor that needs them
+    /// (MAX) is frontmost; switching it off forgets them immediately.
+    var tracksTypedWord = false { didSet { typedWord.reset() } }
+    var typedWordCandidate: TypedWordTracker.Candidate { tracksTypedWord ? typedWord.candidate : .unknown }
+    func replaceTypedWord(_ word: String, with replacement: String) { typedWord.replaceWord(word, with: replacement) }
+    func forgetTypedWord() { typedWord.reset() }
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     var isRunning: Bool { tap != nil }
@@ -109,11 +116,13 @@ final class KeyboardMonitor {
         tap = nil
         source = nil
         detector.reset()
+        typedWord.reset()
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             detector.reset()
+            typedWord.reset()
             burst.cancel()
             pendingDispatch?.cancel()
             inputGeneration &+= 1
@@ -130,6 +139,11 @@ final class KeyboardMonitor {
             return
         }
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        switch type {
+        case .keyDown: recordTyping(event, key: key)
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: typedWord.reset()
+        default: break
+        }
         let interaction: WindowShortcutInteraction
         switch type {
         case .keyDown: interaction = .keyDown
@@ -190,6 +204,17 @@ final class KeyboardMonitor {
         }
         pendingDispatch = work
         DispatchQueue.main.asyncAfter(deadline: .now() + burst.quietInterval, execute: work)
+    }
+
+    /// Runs inside the listening tap: only local string bookkeeping.
+    private func recordTyping(_ event: CGEvent, key: UInt16) {
+        guard tracksTypedWord else { return }
+        guard event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty else { typedWord.reset(); return }
+        if key == 51 { typedWord.backspace(); return }
+        var length = 0
+        var units = [UniChar](repeating: 0, count: 8)
+        event.keyboardGetUnicodeString(maxStringLength: units.count, actualStringLength: &length, unicodeString: &units)
+        typedWord.typed(String(utf16CodeUnits: units, count: min(max(length, 0), units.count)))
     }
 
     deinit { stop() }

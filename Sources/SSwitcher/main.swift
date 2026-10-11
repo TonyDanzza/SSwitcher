@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var permissionRetries = 0
     private var diagnosticsWindow: DiagnosticsWindow?
     private var maxWordDiagnosticTimer: Timer?
+    private var typedReplacementActive = false
+    private static let maxBundleID = "ru.oneme.desktop"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -88,11 +90,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.statusItem.button?.toolTip = self.lastResult
         }
         monitor.canStartConversion = { [weak self] in
-            self?.enabled == true && self?.editor.isConverting == false && self?.nativeServiceDiagnostic.isConverting == false
+            self?.enabled == true && self?.editor.isConverting == false && self?.nativeServiceDiagnostic.isConverting == false &&
+                self?.typedReplacementActive == false
         }
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled, !self.editor.isConverting, !self.nativeServiceDiagnostic.isConverting,
-                  self.monitor.claimConversion() else { return }
+                  !self.typedReplacementActive, self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             // Keep a leftover experimental source from running beside legacy
             // replacement. The utility no longer starts or requests the IME.
@@ -106,8 +109,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.lastResult = "Проверяю поле ввода…"
             let generation = self.monitor.inputGeneration
             let activity = self.monitor.activityGeneration
-            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop" {
+            if let max = NSWorkspace.shared.frontmostApplication, max.bundleIdentifier == Self.maxBundleID {
                 self.editor.performance.cancelGesture()
+                switch self.monitor.typedWordCandidate {
+                case .afterSpace:
+                    self.lastResult = "Курсор должен стоять в конце слова"
+                    self.monitor.conversionFinished(unverified: false)
+                    self.statusItem.button?.toolTip = self.lastResult
+                    return
+                case .word(let word, let boundedStart):
+                    if self.retypeMaxWord(word, boundedStart: boundedStart, pid: max.processIdentifier, generation: generation) { return }
+                case .unknown: break
+                }
                 // Option-Shift-Left is also Qt's word-selection command.
                 // Exclusive Carbon registrations consume it even when their
                 // callback declines the move. Release them for this finite
@@ -161,16 +174,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.windowMoves.cancel()
             self.editor.overlay.cancel()
             self.refreshPermissions()
-            if InputMethodIdentity.currentMode == nil, let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-                self.editor.prepareAccessibility(for: app)
-            }
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self.refreshTypedWordTracking(frontmost: app)
+            if InputMethodIdentity.currentMode == nil, let app { self.editor.prepareAccessibility(for: app) }
         }
+        refreshTypedWordTracking()
         if InputMethodIdentity.currentMode == nil, let app = NSWorkspace.shared.frontmostApplication { editor.prepareAccessibility(for: app) }
         refreshPermissions()
         rebuildMenu()
         if CommandLine.arguments.contains("--check") { presentDiagnostics(activateApplication: false) }
         if CommandLine.arguments.contains("--check-max-word-once") { armMaxWordDiagnostic() }
         if CommandLine.arguments.contains("--inspect-max-arrow-once") { NativeKeyboardEventProbe.start() }
+    }
+
+    /// Typed characters are kept only for MAX and only while conversion is on.
+    private func refreshTypedWordTracking(frontmost: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
+        monitor.tracksTypedWord = enabled && frontmost?.bundleIdentifier == Self.maxBundleID
+    }
+
+    /// MAX path for a word the user has just typed, as layout switchers do:
+    /// delete exactly its characters and type the converted text. No
+    /// selection, Services call, Accessibility read or clipboard. Returns false
+    /// before any key is sent when the native Services route must decide.
+    private func retypeMaxWord(_ word: String, boundedStart: Bool, pid: pid_t, generation: UInt64) -> Bool {
+        guard let count = TypedWordTracker.backspaceCount(for: word), let conversion = InputSources.prepare(word),
+              !IsSecureEventInputEnabled(), CGPreflightPostEventAccess() else { return false }
+        guard conversion.text != word else {
+            lastResult = "Слово не требует замены"
+            monitor.conversionFinished(unverified: false)
+            statusItem.button?.toolTip = lastResult
+            return true
+        }
+        let asOneWord = TypedWordTracker.deletesAsOneWord(word, boundedStart: boundedStart)
+        guard let input = UnicodeTextInput(text: conversion.text),
+              let batches = input.makeEventBatches(deletingCharacters: count, asOneWord: asOneWord) else { return false }
+        typedReplacementActive = true
+        let release = monitor.lastGestureRelease
+        KeyboardEvents.postTextReplacement(batches, targetPID: pid, interval: 0, valid: { [weak self] in
+            guard let self else { return false }
+            return self.monitor.inputGeneration == generation && !IsSecureEventInputEnabled() &&
+                NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        }, modifiersClear: { [weak self] in self?.monitor.observedModifiersClear == true }) { [weak self] delivered in
+            guard let self else { return }
+            self.typedReplacementActive = false
+            let elapsed = Int((ProcessInfo.processInfo.systemUptime - release) * 1000)
+            if delivered {
+                self.monitor.replaceTypedWord(word, with: conversion.text)
+                InputSources.selectAfterConversion(conversion.target)
+                self.lastResult = "Слово MAX перепечатано без выделения (\(elapsed) мс)"
+            } else {
+                self.monitor.forgetTypedWord()
+                self.lastResult = "Замена в MAX прервана вводом; проверьте текст"
+            }
+            UserDefaults.standard.set(["delivered": delivered, "oneWordDeletion": asOneWord, "characters": count,
+                "elapsedMS": elapsed, "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
+                forKey: "TypedWordReplacementReport")
+            self.monitor.conversionFinished(unverified: !delivered)
+            self.statusItem.button?.toolTip = self.lastResult
+        }
+        return true
     }
 
     /// Explicit test entry without an owned text window or focus changes from
@@ -293,6 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabled.toggle()
         UserDefaults.standard.set(!enabled, forKey: "paused")
         monitor.focusChanged()
+        refreshTypedWordTracking()
         refreshPermissions()
         rebuildMenu()
     }

@@ -90,7 +90,11 @@ enum KeyboardEvents {
     /// Text payloads are immutable before the first batch. Receipt paces the
     /// stream; it is never editor proof. A repeated Shift may release within
     /// the existing budget, while all other real input/focus cancels at once.
-    static func postTextReplacement(_ batches: [[CGEvent]], valid: @escaping () -> Bool,
+    /// With `targetPID`, each batch waits for the target's own receipt and is
+    /// posted through the session, the route MAX accepted for typed text.
+    static func postTextReplacement(_ batches: [[CGEvent]], targetPID: pid_t? = nil,
+                                    interval: Double = ConversionTiming.textPairInterval,
+                                    valid: @escaping () -> Bool,
                                     modifiersClear: @escaping () -> Bool, completion: @escaping (Bool) -> Void) {
         guard !batches.isEmpty else { completion(false); return }
         var index = 0
@@ -112,13 +116,13 @@ enum KeyboardEvents {
                 }
             }
             modifierReadiness = nil
-            postAndAwaitDelivery(batches[index]) { delivered in
+            postAndAwaitDelivery(batches[index], targetPID: targetPID, directToTarget: false,
+                                 postingTap: targetPID == nil ? .cghidEventTap : .cgSessionEventTap) { delivered in
                 guard delivered, valid() else { completion(false); return }
                 index += 1
                 if index == batches.count { completion(true) }
-                else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.textPairInterval) { postNext() }
-                }
+                else if interval <= 0 { postNext() }
+                else { DispatchQueue.main.asyncAfter(deadline: .now() + interval) { postNext() } }
             }
         }
         postNext()
