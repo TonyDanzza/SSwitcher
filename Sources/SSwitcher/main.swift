@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let windowMoves = WindowMoveController()
     private let windowHotKeys = WindowMoveHotKeys()
     private let nativeServices = NativeServiceProvider()
+    private lazy var maxRouter = MaxConversionRouter(monitor: monitor, services: nativeServices)
     private var windowMovementEnabled = !UserDefaults.standard.bool(forKey: "windowMovementDisabled")
     private var enabled = !UserDefaults.standard.bool(forKey: "paused")
     private var lastAttempt = "Ещё не срабатывал"
@@ -21,8 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var permissionTimer: Timer?
     private var permissionRetries = 0
     private var diagnosticsWindow: DiagnosticsWindow?
-    private var typedReplacementActive = false
-    private static let maxBundleID = "ru.oneme.desktop"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -91,13 +90,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.lastResult = "Проверьте текст и выделите его заново: предыдущая замена не подтверждена"
             self.statusItem.button?.toolTip = self.lastResult
         }
+        maxRouter.onResult = { [weak self] result in
+            guard let self else { return }
+            self.lastResult = result
+            self.statusItem.button?.toolTip = result
+        }
+        maxRouter.suspendWindowShortcuts = { [weak self] in
+            self?.windowHotKeys.stop()
+            self?.windowMoves.cancel()
+        }
+        maxRouter.restoreWindowShortcuts = { [weak self] in self?.refreshWindowShortcuts() }
         monitor.canStartConversion = { [weak self] in
-            self?.enabled == true && self?.editor.isConverting == false && self?.nativeServices.isConverting == false &&
-                self?.typedReplacementActive == false
+            self?.enabled == true && self?.editor.isConverting == false && self?.maxRouter.isConverting == false
         }
         monitor.onDoubleShift = { [weak self] in
-            guard let self, self.enabled, !self.editor.isConverting, !self.nativeServices.isConverting,
-                  !self.typedReplacementActive, self.monitor.claimConversion() else { return }
+            guard let self, self.enabled, !self.editor.isConverting, !self.maxRouter.isConverting,
+                  self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             // Keep a leftover experimental source from running beside legacy
             // replacement. The utility no longer starts or requests the IME.
@@ -111,45 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.lastResult = "Проверяю поле ввода…"
             let generation = self.monitor.inputGeneration
             let activity = self.monitor.activityGeneration
-            if let max = NSWorkspace.shared.frontmostApplication, max.bundleIdentifier == Self.maxBundleID {
+            if let max = NSWorkspace.shared.frontmostApplication, MaxConversionRouter.isMax(max) {
                 self.editor.performance.cancelGesture()
-                let candidate = self.monitor.typedWordCandidate
-                let kind: String
-                switch candidate { case .unknown: kind = "unknown"; case .afterSpace: kind = "afterSpace"; case .word: kind = "word" }
-                DiagnosticReports.shared.record("TypedWordStateReport", ["candidate": kind, "tracking": self.monitor.tracksTypedWord,
-                    "lastReset": self.monitor.typedWordReset, "keysSinceReset": self.monitor.typedKeysSinceReset,
-                    "translatedKeys": self.monitor.translatedKeysSinceReset, "timestamp": Date().timeIntervalSince1970])
-                if case .word(let word, let boundedStart) = candidate,
-                   self.retypeMaxWord(word, boundedStart: boundedStart, pid: max.processIdentifier, generation: generation) { return }
-                // A typed word after a space may have been autocorrected, so
-                // the editor's own text is read with one native request.
-                let direct = self.monitor.selectionKnownEmpty
-                // Option-Shift-Left is also Qt's word-selection command.
-                // Exclusive Carbon registrations consume it even when their
-                // callback declines the move. Release them for this finite
-                // transaction, then restore the user's current preference.
-                self.windowHotKeys.stop()
-                self.windowMoves.cancel()
-                let started = ProcessInfo.processInfo.systemUptime
-                self.nativeServices.convertAtCursor(valid: { [weak self] in
-                    self?.monitor.inputGeneration == generation
-                }, knownNoSelection: direct) { [weak self] outcome, target in
-                    guard let self else { return }
-                    self.refreshWindowShortcuts()
-                    self.monitor.conversionFinished(unverified: outcome == .unverified)
-                    DiagnosticReports.shared.record("MaxServiceRouteReport", ["direct": direct, "outcome": String(describing: outcome),
-                        "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - started) * 1000)])
-                    switch outcome {
-                    case .submitted:
-                        if let target { InputSources.selectAfterConversion(target) }
-                        if let text = self.nativeServices.lastDirectConversion { self.monitor.assumeTypedWord(text) }
-                        self.lastResult = "Текст передан нативному редактору MAX"
-                    case .unavailable: self.lastResult = self.nativeServices.conversionStatus
-                    case .cancelled: self.lastResult = "Замена отменена: ввод или активное окно изменились"
-                    case .unverified: self.lastResult = "Результат замены MAX не подтверждён; проверьте текст"
-                    }
-                    self.statusItem.button?.toolTip = self.lastResult
-                }
+                self.maxRouter.convert(in: max, generation: generation)
                 return
             }
             self.editor.convertAtCursor(releaseTime: self.monitor.lastGestureRelease, isInputUnchanged: { [weak self] in
@@ -193,63 +165,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--check") { presentDiagnostics(activateApplication: false) }
     }
 
-    /// A direct MAX word request will need a snapshot; start it during the
-    /// Shift quiet interval instead of after it.
+    /// The MAX snapshot for a direct word request starts at the gesture
+    /// release, during the Shift quiet interval.
     private func prepareEarlyMaxShield() {
-        guard enabled, monitor.tracksTypedWord, monitor.selectionKnownEmpty, !editor.isConverting,
-              !nativeServices.isConverting, !typedReplacementActive,
-              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Self.maxBundleID else { return }
-        if case .word = monitor.typedWordCandidate { return }
-        let generation = monitor.inputGeneration
-        nativeServices.prepareEarlyShield(valid: { [weak self] in self?.monitor.inputGeneration == generation })
+        guard enabled, !editor.isConverting else { return }
+        maxRouter.prepareEarlyShield()
     }
 
     /// Typed characters are kept only for MAX and only while conversion is on.
     private func refreshTypedWordTracking(frontmost: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
-        monitor.tracksTypedWord = enabled && frontmost?.bundleIdentifier == Self.maxBundleID
-    }
-
-    /// MAX path for a word the user has just typed, as layout switchers do:
-    /// delete exactly its characters and type the converted text. No
-    /// selection, Services call, Accessibility read or clipboard. Returns false
-    /// before any key is sent when the native Services route must decide.
-    private func retypeMaxWord(_ word: String, boundedStart: Bool, pid: pid_t, generation: UInt64) -> Bool {
-        guard let count = TypedWordTracker.backspaceCount(for: word), let conversion = InputSources.prepare(word),
-              !IsSecureEventInputEnabled(), CGPreflightPostEventAccess() else { return false }
-        guard conversion.text != word else {
-            lastResult = "Слово не требует замены"
-            monitor.conversionFinished(unverified: false)
-            statusItem.button?.toolTip = lastResult
-            return true
-        }
-        let asOneWord = TypedWordTracker.deletesAsOneWord(word, boundedStart: boundedStart)
-        guard let input = UnicodeTextInput(text: conversion.text),
-              let batches = input.makeEventBatches(deletingCharacters: count, asOneWord: asOneWord) else { return false }
-        typedReplacementActive = true
-        let release = monitor.lastGestureRelease
-        KeyboardEvents.postTextReplacement(batches, targetPID: pid, interval: 0, valid: { [weak self] in
-            guard let self else { return false }
-            return self.monitor.inputGeneration == generation && !IsSecureEventInputEnabled() &&
-                NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-        }, modifiersClear: { [weak self] in self?.monitor.observedModifiersClear == true }) { [weak self] delivered in
-            guard let self else { return }
-            self.typedReplacementActive = false
-            let elapsed = Int((ProcessInfo.processInfo.systemUptime - release) * 1000)
-            if delivered {
-                self.monitor.replaceTypedWord(word, with: conversion.text)
-                self.monitor.assumeSelectionEmpty()
-                InputSources.selectAfterConversion(conversion.target)
-                self.lastResult = "Слово MAX перепечатано без выделения (\(elapsed) мс)"
-            } else {
-                self.monitor.forgetTypedWord("interrupted")
-                self.lastResult = "Замена в MAX прервана вводом; проверьте текст"
-            }
-            DiagnosticReports.shared.record("TypedWordReplacementReport", ["delivered": delivered, "oneWordDeletion": asOneWord,
-                "characters": count, "elapsedMS": elapsed])
-            self.monitor.conversionFinished(unverified: !delivered)
-            self.statusItem.button?.toolTip = self.lastResult
-        }
-        return true
+        monitor.tracksTypedWord = enabled && MaxConversionRouter.isMax(frontmost)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { refreshPermissions() }

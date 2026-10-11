@@ -6,6 +6,7 @@
 - `KeyboardMonitor`: listening event tap, physical modifier tracking, input generations, double-Shift admission and burst handling.
 - `ConversionCoordinator` and `AXClient`: ordinary editor discovery, coherent text/range evidence, one replacement and document/cursor verification.
 - `TypedWordTracker`: in-memory characters typed since the caret last moved, used only while MAX is frontmost.
+- `MaxConversionRouter`: picks the MAX route with the pure `MaxConversionRoute` (retype a typed word, one direct Services request, or the full Services transaction) and runs it.
 - `NativeServiceProvider`, `NativeSelectionServiceProof` and `NativeWordServiceCoordinator`: the MAX Services provider (Cmd+F19 packet, Cmd+F20 barrier) and its transaction.
 - `WindowMoveController`: directional window transfer using Accessibility; `WindowMoveHotKeys` owns the Carbon shortcut registrations.
 - `DiagnosticsWindow`, `PerformanceRecorder` and `ReplacementOverlay`: status, bounded measurements and an optional visual transition for editors with reliable geometry.

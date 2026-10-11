@@ -302,7 +302,7 @@ final class NativeSelectionServiceProof {
 
     private func foregroundMatches(_ identity: WindowIdentity) -> Bool {
         guard let app = NSWorkspace.shared.frontmostApplication else { return false }
-        return app.bundleIdentifier == "ru.oneme.desktop" && app.processIdentifier == identity.pid && !app.isTerminated
+        return app.bundleIdentifier == MaxConversionRoute.bundleID && app.processIdentifier == identity.pid && !app.isTerminated
     }
 
     private func ordinarySourceID() -> String? {
@@ -321,7 +321,7 @@ final class NativeSelectionServiceProof {
         let deadline = ReadinessDeadline(start: now, timeout: max(0, min(0.36, armDeadline.expiresAt - now)))
         guard AXIsProcessTrusted() else { return (nil, "permission", nil) }
         guard !IsSecureEventInputEnabled() else { return (nil, "secure", nil) }
-        guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "ru.oneme.desktop",
+        guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == MaxConversionRoute.bundleID,
               !app.isTerminated else { return (nil, "foreground", nil) }
         guard let sourceID = ordinarySourceID() else { return (nil, "ordinarySource", nil) }
         guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else { return (nil, "expired", nil) }
