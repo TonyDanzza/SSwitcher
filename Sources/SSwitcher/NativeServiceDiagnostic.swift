@@ -52,7 +52,9 @@ final class NativeServiceDiagnostic: NSObject {
 
     func cancelConversion() {
         selectionProof.cancelAutomatic()
+        selectionProof.cancelVisualShield()
     }
+    func cancelVisualShield() { selectionProof.cancelVisualShield() }
     private var generation: Grant?
     private var generationNumber = 0
     private var waitingForReadback = false

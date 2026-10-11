@@ -65,10 +65,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.statusItem.button?.toolTip = self.windowMoves.lastResult
         }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.nativeServiceDiagnostic.cancelVisualShield()
             self?.refreshWindowShortcuts()
             self?.rebuildMenu()
         }
-        monitor.onUserActivity = { [weak self] in self?.editor.overlay.cancel() }
+        monitor.onUserActivity = { [weak self] in
+            self?.editor.overlay.cancel()
+            // Bare Shift taps are drained by the active MAX transaction. They
+            // must not expose its intermediate selection. Typing, clicks,
+            // scrolling and other modifiers cancel via onRealInput below.
+        }
         monitor.onRealInput = { [weak self] in
             self?.editor.userInputChanged()
             self?.nativeServiceDiagnostic.cancelConversion()
@@ -151,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] notification in
             guard let self else { return }
             self.monitor.focusChanged()
+            self.nativeServiceDiagnostic.cancelVisualShield()
             self.windowMoves.cancel()
             self.editor.overlay.cancel()
             self.refreshPermissions()
@@ -239,8 +246,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggle.state = enabled ? .on : .off
         let smooth = add("Плавная замена", action: #selector(toggleSmoothReplacement), to: menu)
         smooth.state = ReplacementOverlay.enabled ? .on : .off
-        if ReplacementOverlay.enabled && !CGPreflightScreenCaptureAccess() {
-            add("Разрешить запись экрана для анимации…", action: #selector(requestScreenCapture), to: menu)
+        if !CGPreflightScreenCaptureAccess() {
+            add("Разрешить запись экрана для плавной замены…", action: #selector(requestScreenCapture), to: menu)
         }
         if !monitor.isRunning && (enabled || windowMovementEnabled) {
             add("Разрешить мониторинг ввода…", action: #selector(requestPermission), to: menu)

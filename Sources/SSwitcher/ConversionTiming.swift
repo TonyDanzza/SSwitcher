@@ -23,4 +23,7 @@ enum ConversionTiming {
     static let captureBudget = 0.055
     static let revealDuration = 0.09
     static let overlayWatchdog = 0.65
+    static let nativeVisualPresentationSettle = 0.034
+    static let nativeVisualCommitSettle = 0.05
+    static let nativeVisualWatchdog = 1.0
 }

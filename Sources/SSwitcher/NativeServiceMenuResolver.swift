@@ -41,7 +41,7 @@ enum NativeServiceMenuResolver {
         builtInWindowBounds(window, pid: pid) != nil
     }
 
-    private static func windowBounds(_ window: AXUIElement, pid: pid_t,
+    static func windowBounds(_ window: AXUIElement, pid: pid_t,
                                      report: (([String: Any]) -> Void)? = nil) -> CGRect? {
         let reader = Reader(pid: pid, cancellation: AttemptCancellation(), timeout: 0.2, queryLimit: 8)
         guard let rawPoint = reader.value(window, kAXPositionAttribute),

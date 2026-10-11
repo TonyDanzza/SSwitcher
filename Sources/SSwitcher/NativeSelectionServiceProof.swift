@@ -50,6 +50,7 @@ final class NativeSelectionServiceProof {
     private var menuCancellation: AttemptCancellation?
     private var editableCancellation: AttemptCancellation?
     private var generation = 0
+    private let visualShield = NativeWordVisualShield()
     private final class Automatic {
         let identity: WindowIdentity
         let valid: () -> Bool
@@ -146,8 +147,26 @@ final class NativeSelectionServiceProof {
             }
         request.word = word
         record(["stage": "nativeWordBoundary", "automatic": true])
-        word.start()
+        // Resolve window geometry outside a synchronous Services callback.
+        // No text-field or guessed composer coordinates are needed.
+        menuWorker.async { [weak self, weak request] in
+            guard let self, let request else { return }
+            let bounds = NativeServiceMenuResolver.windowBounds(identity.window, pid: identity.pid)
+            DispatchQueue.main.async { [weak self, weak request] in
+                guard let self, let request, self.generation == epoch, self.automatic === request else { return }
+                self.visualShield.prepare(bounds: bounds, valid: { [weak self, weak request] in
+                    guard let self, let request else { return false }
+                    return self.generation == epoch && self.automatic === request && localReady()
+                }) { [weak self, weak request] in
+                    guard let self, let request, self.generation == epoch, self.automatic === request else { return }
+                    guard localReady() else { self.finishAutomatic(.cancelled); return }
+                    word.start()
+                }
+            }
+        }
     }
+
+    func cancelVisualShield() { visualShield.cancel() }
 
     func cancelAutomatic() {
         guard Thread.isMainThread else { return }
@@ -168,6 +187,10 @@ final class NativeSelectionServiceProof {
         menuCancellation?.cancel(); menuCancellation = nil
         expiry?.cancel(); expiry = nil
         generation += 1
+        // Closing a pending snapshot can synchronously resume preparation.
+        // Retire the transaction first so its completion cannot start keys
+        // during cancellation or shutdown.
+        visualShield.finish(submitted: outcome == .submitted)
         status = outcome == .submitted ? "Нативная замена MAX принята" : (request.failure ?? "Нативная замена MAX не подтверждена")
         record(["stage": String(describing: outcome), "automatic": true,
                 "responsePublished": request.state.publication == true,
@@ -222,6 +245,7 @@ final class NativeSelectionServiceProof {
     func cancel() {
         guard Thread.isMainThread else { return }
         cancelAutomatic()
+        visualShield.cancel()
         let wasArmed = grant != nil || waitingDeadline != nil
         if grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false { KeyboardEvents.cancelDelivery() }
         let completion = readbackCompletion

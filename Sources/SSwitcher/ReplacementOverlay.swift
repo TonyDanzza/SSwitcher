@@ -99,6 +99,10 @@ final class ImageOverlay {
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.hasShadow = false
+        // AppKit may animate even a borderless, nonactivating panel when it is
+        // ordered in/out. Scaling a captured editor creates a whole-window
+        // jump. The snapshot must enter and leave at its exact pixel geometry.
+        panel.animationBehavior = .none
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isExcludedFromWindowsMenu = true

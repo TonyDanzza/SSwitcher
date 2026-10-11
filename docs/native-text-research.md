@@ -16,7 +16,7 @@ References: [Apple CGEvent](https://developer.apple.com/documentation/coregraphi
 
 A Services request passes a dedicated text packet from an application's selected text to the provider and returns a replacement response. SSwitcher does not use the general clipboard for this route. Qt's Cocoa integration reads the current selection and commits the returned plain string; this Services interface does not supply an arbitrary document replacement range.
 
-MAX currently uses this route for manual selection and an internally selected word. Navigation is bound to the original window, callbacks are one-shot, uncertain boundaries are refused, and no failed mutation is retried. Temporary selection is still visible; response publication is not whole-document acknowledgement.
+MAX currently uses this route for manual selection and an internally selected word. Navigation is bound to the original window, callbacks are one-shot, uncertain boundaries are refused, and no failed mutation is retried. An optional screen-capture capability now hides temporary word selection with a nonanimated snapshot; without it, selection can remain visible. This changes presentation, not the native editing mechanism. Response publication is not whole-document acknowledgement.
 
 References: [Apple Services provider guide](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/SysServices/Articles/providing.html) and [Qt qnsview_complextext.mm](https://github.com/qt/qtbase/blob/v6.11.2/src/plugins/platforms/cocoa/qnsview_complextext.mm).
 

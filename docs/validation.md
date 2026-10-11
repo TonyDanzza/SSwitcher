@@ -1,8 +1,8 @@
-# Validation — 0.1.22 / build 153
+# Validation — 0.1.22 / build 157
 
 ## Automated checks
 
-On 11 October 2026, `swift test` ran **207 tests with zero failures**. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
+On 11 October 2026, `swift test` ran **207 tests with zero failures**, including the final build 157 source. The signed release build completed successfully. The installed release's signature was checked. GitHub Actions repeats tests and packages the app on macOS.
 
 Build 151 records a successful input-source selection only after reading back the requested source ID. A delayed or duplicate notification of that same selection no longer resets the next gesture or clears burst protection. Tests cover a notice between the two Shift taps, real external source changes, failed selection and unavailable source identity. This addresses a cancellation race; it does not establish that this race caused every reported MAX failure.
 
@@ -27,9 +27,19 @@ Screenshots of the actual composer were checked in addition to service reports. 
 
 One final word conversion took 317 ms, including a 17 ms commit stage. These are individual measurements, not benchmark percentiles or compositor timings. The existing 250 ms requestor-return settle remains; this change does not establish a latency improvement.
 
+## Snapshot presentation checks
+
+Build 154 hid selection but the user reported that the whole MAX window jerked. A short, local ScreenCaptureKit recording reproduced scaling of the snapshot during panel presentation/removal. A stable snapshot fidelity check matched the original image exactly, so scaling/color conversion was not the established cause. The panel's implicit AppKit window animation was disabled in build 155 and retained in build 157.
+
+Window recordings on builds 155–157 no longer showed the reproduced whole-window scaling. One build 157 reverse-conversion recording had no changed sampled pixels outside the composer; another had a small localized difference of 313 samples rather than the tens of thousands observed during the earlier scaling. These are bounded fixture observations, not a general perceptual benchmark. The earlier selection-color detector was not calibrated and is not accepted as proof of absent selection flash.
+
+Actual final composer images and native reports on build 157 confirmed conversion before a space with the neighbor preserved, selected-phrase → last-word conversion without another manual selection, and reverse last-word conversion. Build 156 additionally refused an inside-word attempt without changing text and preserved both words during eight Shift taps, with no held modifier keys afterward. No messages were sent. Later test-draft changes were preserved rather than deleted or overwritten to force an earlier fixture.
+
+Individual visual-shield lifetimes measured roughly 0.4–0.5 seconds. The 250 ms native requestor-return settle remains. The mask adds capture and presentation time; this change establishes a fix for the reproduced panel scaling, not a latency improvement. Production captures one image in memory; short video recordings and cropped fixture images were explicit local diagnostic tools, not production recording.
+
 ## Remaining issues
 
-- MAX uses transient native selection: the selection can flash before replacement.
+- MAX uses transient native selection. With screen capture unavailable, timed out, or cancelled by input, it can flash before replacement.
 - The selected-phrase → cursor-word transition passed the bounded build 153 checks, but intermittent failures are not ruled out.
 - MAX Services receipts prove response publication and native action acceptance, not whole-document or cursor verification through Accessibility.
 - The browser, Notes and Figma routes were not all re-tested for this source snapshot.
