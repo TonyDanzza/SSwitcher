@@ -30,4 +30,16 @@ Open-source switches offer useful implementation comparisons, including [UASwitc
 
 Caramba's observed behavior is a comparison target. Its closed implementation has not been established from public source; do not claim it uses the clipboard or a specific native API without evidence.
 
+## MAX word deletion experiment — 11 October 2026
+
+An isolated test used the native previous-word deletion command (Option + Backspace), followed by a prepared Unicode payload. Qt documents this command as `DeleteStartOfWord` in [QKeySequence](https://doc.qt.io/qt-6/qkeysequence.html). The experiment used known six-letter words in an explicitly observed test draft, with no Services call, general clipboard access, selection or snapshot cover. It is not an installed conversion backend.
+
+Both directions preserved a neighboring word, and ordinary typing after conversion worked. Target event receipts took 32–52 ms. The first replacement frames in narrow 60 Hz composer recordings appeared roughly 68–77 ms after command submission. These are individual command-to-frame samples, not double-Shift-to-frame measurements or benchmark percentiles.
+
+Sending deletion and Unicode insertion together did not make the edit atomic. A prefix-preservation trial showed the last word absent in a frame about 60 ms after submission, then replaced about 77 ms after submission. Single-word trials happened not to show that intermediate state. Consequently this route is faster in the controlled fixture, but it fails the strict invisible-replacement requirement.
+
+It also requires reliable knowledge of the complete current word and caret. Remembering a typed suffix after an arbitrary click does not establish the unknown prefix; deleting the whole word would risk erasing that prefix. Event receipts establish delivery, not document state. Do not integrate this experiment as an arbitrary-cursor replacement without resolving both context authority and intermediate rendering.
+
+Qt's Cocoa bridge applies a native `replacementRange` through one input-method commit inside the receiving text client. This is the relevant single-edit mechanism, but a separate process cannot obtain that client merely by observing CGEvents. Services supplies the actual selection instead. Shorter service waits, a snapshot cover, and faster key posting do not create a remote range-editing API.
+
 See [architecture.md](architecture.md) for the implemented route and [validation.md](validation.md) for tested behavior and open issues.

@@ -49,6 +49,17 @@ Actual final composer images and native reports on build 157 confirmed conversio
 
 Individual visual-shield lifetimes measured roughly 0.4–0.5 seconds. The 250 ms native requestor-return settle remains. The mask adds capture and presentation time; this change establishes a fix for the reproduced panel scaling, not a latency improvement. Production captures one image in memory; short video recordings and cropped fixture images were explicit local diagnostic tools, not production recording.
 
+## Isolated alternative mechanism — not shipped
+
+On 11 October, native Option + Backspace plus explicit Unicode insertion was tested only on known words in the MAX composer on the MacBook display. It converted in both directions, preserved a preceding word, and allowed ordinary typing afterward. The original observed draft was restored, general pasteboard metadata remained unchanged, no held modifiers were found, and no messages were sent. The installed build 164 was unchanged.
+
+| Variant | Observed result | Limitation |
+| --- | --- | --- |
+| Word deletion, then insertion after a target receipt | Correct forward/reverse replacement; first changed frames about 73–75 ms after submission | A frame without the word appeared during forward replacement. |
+| Prepared deletion and insertion posted together | Correct forward/reverse replacement; first changed frames about 68–77 ms after submission | A neighboring-word trial still showed an empty last-word frame before replacement. |
+
+These individual 60 Hz frame samples start at command submission, whereas the installed build's 850 ms sample starts at the second Shift release. They are not directly comparable end-to-end benchmarks. Recordings interrupted by unrelated input were excluded. The experiment has no validated source of arbitrary current word/caret context and does not establish atomic or invisible editing. Test scripts and composer images remain outside Git.
+
 ## Remaining issues
 
 - MAX uses transient native selection. With screen capture unavailable, timed out, or cancelled by input, it can flash before replacement.
