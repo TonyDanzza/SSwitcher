@@ -61,7 +61,7 @@ final class NativeWordServiceCoordinator {
             return
         }
         guard waitForModifiers({ [weak self] in self?.start() }) else { return }
-        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = windowNumber(),
               let raw = NativeServiceBarrierEvents.batch([
                 (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
               ]),
@@ -134,7 +134,7 @@ final class NativeWordServiceCoordinator {
         // receives the actual selection, validates it, and returns its
         // replacement in that same call. No extra read/navigation/AX action
         // occurs while the word is selected.
-        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = windowNumber(),
               let raw = NativeServiceBarrierEvents.batch(
                 (restoreBoundary ? [(CGKeyCode(kVK_LeftArrow), CGEventFlags())] : []) + [
                     (CGKeyCode(kVK_LeftArrow), [.maskAlternate, .maskShift]),
@@ -220,6 +220,15 @@ final class NativeWordServiceCoordinator {
 
     private var live: Bool { !finished && valid() }
 
+    /// The window server number of the transaction's window, resolved once.
+    /// `beforeKeys` still proves the same focused AX window before each batch.
+    private var resolvedWindowNumber: Int?
+    private func windowNumber() -> Int? {
+        if let resolvedWindowNumber { return resolvedWindowNumber }
+        resolvedWindowNumber = NativeWindowLocator.windowNumber(window, pid: pid)
+        return resolvedWindowNumber
+    }
+
     private func perform(_ steps: [(CGKeyCode, CGEventFlags)], then: @escaping () -> Void) {
         guard !steps.isEmpty else { then(); return }
         if steps.count > 1 {
@@ -230,7 +239,7 @@ final class NativeWordServiceCoordinator {
         }
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.perform(steps, then: then) }) else { return }
-        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = windowNumber(),
               let raw = NativeServiceBarrierEvents.batch(steps, state: .privateState),
               let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Замена отменена: исходное окно или клавиши недоступны"); return
@@ -252,7 +261,7 @@ final class NativeWordServiceCoordinator {
                       navigation: [(CGKeyCode, CGEventFlags)] = []) {
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.read(completion, noSelection: noSelection, navigation: navigation) }) else { return }
-        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = windowNumber(),
               let raw = NativeServiceBarrierEvents.batch(navigation + [
                 (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
               ]),
