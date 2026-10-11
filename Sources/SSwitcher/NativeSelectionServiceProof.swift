@@ -65,16 +65,14 @@ final class NativeSelectionServiceProof {
         let identity = request.identity
         func localReady() -> Bool {
             generation == epoch && automatic === request && request.valid() &&
-                !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && foregroundMatches(identity) &&
-                ordinarySourceID() == identity.sourceID && !IsSecureEventInputEnabled()
+                !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && contextMatches(identity)
         }
         guard localReady() else { finishAutomatic(.cancelled); return }
         let word = NativeWordServiceCoordinator(pid: identity.pid, window: identity.window, direct: direct,
             valid: { [weak self, weak request] in
                 guard let self, let request else { return false }
                 return self.generation == epoch && self.automatic === request && request.valid() &&
-                    !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && self.foregroundMatches(identity) &&
-                    self.ordinarySourceID() == identity.sourceID && !IsSecureEventInputEnabled()
+                    !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && self.contextMatches(identity)
             }, beforeKeys: { [weak self] in
                 guard let self else { return false }
                 let capture = self.captureWindow(armDeadline: deadline)
@@ -138,8 +136,7 @@ final class NativeSelectionServiceProof {
 
     private func finishAutomatic(_ outcome: NativeServiceDispatchState.Outcome) {
         guard let request = automatic else { return }
-        let outcome = outcome == .submitted && (!request.valid() || !foregroundMatches(request.identity) ||
-            ordinarySourceID() != request.identity.sourceID || IsSecureEventInputEnabled()) ? .unverified : outcome
+        let outcome = outcome == .submitted && (!request.valid() || !contextMatches(request.identity)) ? .unverified : outcome
         if outcome == .submitted { lastDirectConversion = request.word?.convertedText }
         request.word?.cancel()
         automatic = nil
@@ -157,8 +154,7 @@ final class NativeSelectionServiceProof {
         // ordinary keyboard source. Keep only receipts/context, never text.
         DispatchQueue.main.async { [weak self] in
             guard let self else { request.completion(.cancelled, nil); return }
-            let fresh = request.valid() && self.foregroundMatches(request.identity) &&
-                self.ordinarySourceID() == request.identity.sourceID && !IsSecureEventInputEnabled()
+            let fresh = request.valid() && self.contextMatches(request.identity)
             let final = outcome == .submitted && !fresh ? NativeServiceDispatchState.Outcome.unverified : outcome
             if final != outcome {
                 self.record(["stage": "unverified", "automatic": true,
@@ -183,8 +179,7 @@ final class NativeSelectionServiceProof {
         guard let error else { return }
         error.pointee = "SSwitcher: проверка ввода завершена, текст не изменён" as NSString
         guard Thread.isMainThread, let request = automatic, request.word != nil, request.valid(),
-              foregroundMatches(request.identity), ordinarySourceID() == request.identity.sourceID,
-              !IsSecureEventInputEnabled(), ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(packet.name) else { return }
+              contextMatches(request.identity), NativeServicePacket.isDedicated(packet.name) else { return }
         // A barrier is a successful zero-write request, not a diagnostic
         // error. Clear only this dedicated packet; never return an empty
         // string or let stale formats reinsert text in Qt.
@@ -213,8 +208,7 @@ final class NativeSelectionServiceProof {
             "providerActive": NSApp.isActive, "inputUnchanged": request.valid(),
             "hostActive": NSRunningApplication(processIdentifier: request.identity.pid)?.isActive == true,
             "menuOwnerMAX": NSWorkspace.shared.menuBarOwningApplication?.processIdentifier == request.identity.pid])
-        guard request.valid(), foregroundMatches(request.identity), ordinarySourceID() == request.identity.sourceID,
-              !IsSecureEventInputEnabled(), ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(packet.name),
+        guard request.valid(), contextMatches(request.identity), NativeServicePacket.isDedicated(packet.name),
               packet.availableType(from: [.string]) == .string, let text = packet.string(forType: .string) else { return true }
         _ = word.receivePacket(text)
         return true
@@ -262,9 +256,7 @@ final class NativeSelectionServiceProof {
         guard ready() else { complete("contextRejected"); return }
         let name = pasteboard.name
         report["nonGeneralBoard"] = name != .general
-        guard ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(name) else {
-            complete("standardBoardRejected"); return
-        }
+        guard NativeServicePacket.isDedicated(name) else { complete("standardBoardRejected"); return }
         guard pasteboard.availableType(from: [.string]) == .string,
               let text = pasteboard.string(forType: .string) else { complete("stringUnavailable"); return }
         report["hasString"] = true
@@ -300,6 +292,12 @@ final class NativeSelectionServiceProof {
         automatic?.target = conversion.target
         error.pointee = nil
         complete("responsePublished")
+    }
+
+    /// MAX is still frontmost in the transaction's process, the same ordinary
+    /// keyboard layout is selected and secure input is off.
+    private func contextMatches(_ identity: WindowIdentity) -> Bool {
+        foregroundMatches(identity) && ordinarySourceID() == identity.sourceID && !IsSecureEventInputEnabled()
     }
 
     private func foregroundMatches(_ identity: WindowIdentity) -> Bool {
