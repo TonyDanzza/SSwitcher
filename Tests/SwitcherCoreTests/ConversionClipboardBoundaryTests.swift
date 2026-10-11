@@ -17,13 +17,13 @@ final class ConversionClipboardBoundaryTests: XCTestCase {
             XCTAssertFalse(source.contains("PasteboardTransaction"), url.path)
             XCTAssertEqual(shortcut.numberOfMatches(in: source, range: NSRange(source.startIndex..., in: source)), 0, url.path)
         }
-        // The UI may explicitly copy a diagnostic report. The separately armed
-        // service provider may only read the packet supplied by the OS requestor.
+        // The UI may explicitly copy a diagnostic report. The service provider
+        // may only read the packet supplied by the OS requestor.
         // The selected-only experiment may publish one private service response;
         // these exceptions never authorize pasteboards in legacy conversion.
-        XCTAssertEqual(clipboardFiles.sorted(), ["DiagnosticsWindow.swift", "NativeSelectionServiceProof.swift", "NativeServiceDiagnostic.swift", "NativeServicePacket.swift"])
+        XCTAssertEqual(clipboardFiles.sorted(), ["DiagnosticsWindow.swift", "NativeSelectionServiceProof.swift", "NativeServicePacket.swift", "NativeServiceProvider.swift"])
 
-        let service = try String(contentsOf: sourceRoot.appendingPathComponent("SSwitcher/NativeServiceDiagnostic.swift"), encoding: .utf8)
+        let service = try String(contentsOf: sourceRoot.appendingPathComponent("SSwitcher/NativeServiceProvider.swift"), encoding: .utf8)
         let acquireBoard = try NSRegularExpression(pattern: #"\bNSPasteboard\s*(?:\(|\.\s*(?:general|find|font|ruler|drag|withUniqueName|init)\b)"#)
         let modifyBoard = try NSRegularExpression(pattern: #"\.\s*(?:write\w*|clear\w*|declare\w*|redeclare\w*|addTypes|setString|setData|setPropertyList|prepareForNewContents|releaseGlobally)\s*\("#)
         let serviceRange = NSRange(service.startIndex..., in: service)
@@ -42,7 +42,7 @@ final class ConversionClipboardBoundaryTests: XCTestCase {
                        "Only one plain-type declaration and one response publication are permitted")
         XCTAssertFalse(selected.contains("NSGetPasteboard"))
         XCTAssertFalse(selected.contains("TISSelectInputSource"))
-        let callbackStart = try XCTUnwrap(selected.range(of: "    func convert("))
+        let callbackStart = try XCTUnwrap(selected.range(of: "    private func convert("))
         let callbackEnd = try XCTUnwrap(selected.range(of: "    private func foregroundMatches", range: callbackStart.upperBound..<selected.endIndex))
         let callback = String(selected[callbackStart.lowerBound..<callbackEnd.lowerBound])
         XCTAssertFalse(callback.contains("AXUIElement"), "The waiting service host must not receive AX IPC")
@@ -51,7 +51,7 @@ final class ConversionClipboardBoundaryTests: XCTestCase {
             XCTAssertFalse(selected.contains(forbidden), "Arming must not activate, type into or mutate a foreign client")
         }
         let diagnosticStart = try XCTUnwrap(service.range(of: "    func checkNativeSelection("))
-        let diagnosticEnd = try XCTUnwrap(service.range(of: "    @objc(convertNativeSelection", range: diagnosticStart.upperBound..<service.endIndex))
+        let diagnosticEnd = try XCTUnwrap(service.range(of: "    @objc(checkNativeEditable", range: diagnosticStart.upperBound..<service.endIndex))
         let diagnosticCallback = String(service[diagnosticStart.lowerBound..<diagnosticEnd.lowerBound])
         XCTAssertFalse(diagnosticCallback.contains("AXUIElement"))
         XCTAssertFalse(diagnosticCallback.contains("captureWindow("))

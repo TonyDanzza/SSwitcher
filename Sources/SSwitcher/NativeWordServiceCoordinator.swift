@@ -61,10 +61,10 @@ final class NativeWordServiceCoordinator {
             return
         }
         guard waitForModifiers({ [weak self] in self?.start() }) else { return }
-        guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
               let raw = NativeServiceBarrierEvents.batch([
                 (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
-              ], appendProbe: false),
+              ]),
               let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Нативная проверка выделения MAX недоступна"); return
         }
@@ -134,12 +134,12 @@ final class NativeWordServiceCoordinator {
         // receives the actual selection, validates it, and returns its
         // replacement in that same call. No extra read/navigation/AX action
         // occurs while the word is selected.
-        guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
               let raw = NativeServiceBarrierEvents.batch(
                 (restoreBoundary ? [(CGKeyCode(kVK_LeftArrow), CGEventFlags())] : []) + [
                     (CGKeyCode(kVK_LeftArrow), [.maskAlternate, .maskShift]),
                     (CGKeyCode(kVK_F19), .maskCommand)
-                ], appendProbe: false),
+                ]),
               let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Нативная замена слова недоступна"); return
         }
@@ -232,8 +232,8 @@ final class NativeWordServiceCoordinator {
         }
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.perform(steps, then: then) }) else { return }
-        guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
-              let raw = NativeServiceBarrierEvents.batch(steps, appendProbe: false, state: .privateState),
+        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
+              let raw = NativeServiceBarrierEvents.batch(steps, state: .privateState),
               let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Замена отменена: исходное окно или клавиши недоступны"); return
         }
@@ -254,10 +254,10 @@ final class NativeWordServiceCoordinator {
                       navigation: [(CGKeyCode, CGEventFlags)] = []) {
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.read(completion, noSelection: noSelection, navigation: navigation) }) else { return }
-        guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
+        guard beforeKeys(), let number = NativeWindowLocator.windowNumber(window, pid: pid),
               let raw = NativeServiceBarrierEvents.batch(navigation + [
                 (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
-              ], appendProbe: false),
+              ]),
               let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Нативное чтение MAX недоступно"); return
         }

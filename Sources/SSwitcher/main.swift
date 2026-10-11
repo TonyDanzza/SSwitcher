@@ -10,8 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let loginAtLaunch = LoginAtLaunch()
     private let windowMoves = WindowMoveController()
     private let windowHotKeys = WindowMoveHotKeys()
-    private let maxFocusDiagnostic = MaxFocusDiagnostic()
-    private let nativeServiceDiagnostic = NativeServiceDiagnostic()
+    private let nativeServices = NativeServiceProvider()
     private var windowMovementEnabled = !UserDefaults.standard.bool(forKey: "windowMovementDisabled")
     private var enabled = !UserDefaults.standard.bool(forKey: "paused")
     private var lastAttempt = "Ещё не срабатывал"
@@ -22,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var permissionTimer: Timer?
     private var permissionRetries = 0
     private var diagnosticsWindow: DiagnosticsWindow?
-    private var maxWordDiagnosticTimer: Timer?
     private var typedReplacementActive = false
     private static let maxBundleID = "ru.oneme.desktop"
 
@@ -36,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
-        NSApp.servicesProvider = nativeServiceDiagnostic
+        NSApp.servicesProvider = nativeServices
         // Public refresh for this installed application's static NSServices;
         // the ready provider can receive calls immediately and rejects unarmed.
         NSUpdateDynamicServices()
@@ -68,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.statusItem.button?.toolTip = self.windowMoves.lastResult
         }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.nativeServiceDiagnostic.cancelVisualShield()
+            self?.nativeServices.cancelVisualShield()
             self?.refreshWindowShortcuts()
             self?.rebuildMenu()
         }
@@ -80,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         monitor.onRealInput = { [weak self] in
             self?.editor.userInputChanged()
-            self?.nativeServiceDiagnostic.cancelConversion()
+            self?.nativeServices.cancelConversion()
         }
         monitor.onWindowInteraction = { [weak self] in self?.windowMoves.userInteracted() }
         monitor.onGestureRelease = { [weak self] time in
@@ -95,11 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.statusItem.button?.toolTip = self.lastResult
         }
         monitor.canStartConversion = { [weak self] in
-            self?.enabled == true && self?.editor.isConverting == false && self?.nativeServiceDiagnostic.isConverting == false &&
+            self?.enabled == true && self?.editor.isConverting == false && self?.nativeServices.isConverting == false &&
                 self?.typedReplacementActive == false
         }
         monitor.onDoubleShift = { [weak self] in
-            guard let self, self.enabled, !self.editor.isConverting, !self.nativeServiceDiagnostic.isConverting,
+            guard let self, self.enabled, !self.editor.isConverting, !self.nativeServices.isConverting,
                   !self.typedReplacementActive, self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             // Keep a leftover experimental source from running beside legacy
@@ -136,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.windowHotKeys.stop()
                 self.windowMoves.cancel()
                 let started = ProcessInfo.processInfo.systemUptime
-                self.nativeServiceDiagnostic.convertAtCursor(valid: { [weak self] in
+                self.nativeServices.convertAtCursor(valid: { [weak self] in
                     self?.monitor.inputGeneration == generation
                 }, knownNoSelection: direct) { [weak self] outcome, target in
                     guard let self else { return }
@@ -149,9 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     switch outcome {
                     case .submitted:
                         if let target { InputSources.selectAfterConversion(target) }
-                        if let text = self.nativeServiceDiagnostic.lastDirectConversion { self.monitor.assumeTypedWord(text) }
+                        if let text = self.nativeServices.lastDirectConversion { self.monitor.assumeTypedWord(text) }
                         self.lastResult = "Текст передан нативному редактору MAX"
-                    case .unavailable: self.lastResult = self.nativeServiceDiagnostic.conversionStatus
+                    case .unavailable: self.lastResult = self.nativeServices.conversionStatus
                     case .cancelled: self.lastResult = "Замена отменена: ввод или активное окно изменились"
                     case .unverified: self.lastResult = "Результат замены MAX не подтверждён; проверьте текст"
                     }
@@ -184,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] notification in
             guard let self else { return }
             self.monitor.focusChanged()
-            self.nativeServiceDiagnostic.cancelVisualShield()
+            self.nativeServices.cancelVisualShield()
             self.windowMoves.cancel()
             self.editor.overlay.cancel()
             self.refreshPermissions()
@@ -197,19 +195,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshPermissions()
         rebuildMenu()
         if CommandLine.arguments.contains("--check") { presentDiagnostics(activateApplication: false) }
-        if CommandLine.arguments.contains("--check-max-word-once") { armMaxWordDiagnostic() }
-        if CommandLine.arguments.contains("--inspect-max-arrow-once") { NativeKeyboardEventProbe.start() }
     }
 
     /// A direct MAX word request will need a snapshot; start it during the
     /// Shift quiet interval instead of after it.
     private func prepareEarlyMaxShield() {
         guard enabled, monitor.tracksTypedWord, monitor.selectionKnownEmpty, !editor.isConverting,
-              !nativeServiceDiagnostic.isConverting, !typedReplacementActive,
+              !nativeServices.isConverting, !typedReplacementActive,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Self.maxBundleID else { return }
         if case .word = monitor.typedWordCandidate { return }
         let generation = monitor.inputGeneration
-        nativeServiceDiagnostic.prepareEarlyShield(valid: { [weak self] in self?.monitor.inputGeneration == generation })
+        nativeServices.prepareEarlyShield(valid: { [weak self] in self?.monitor.inputGeneration == generation })
     }
 
     /// Typed characters are kept only for MAX and only while conversion is on.
@@ -261,23 +257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
-    /// Explicit test entry without an owned text window or focus changes from
-    /// UI automation. One attempt on the built-in display; never at normal launch.
-    private func armMaxWordDiagnostic() {
-        let deadline = ProcessInfo.processInfo.systemUptime + 15
-        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                self.maxWordDiagnosticTimer?.invalidate(); self.maxWordDiagnosticTimer = nil; return
-            }
-            guard !NSApp.isActive, NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop" else { return }
-            self.maxWordDiagnosticTimer?.invalidate(); self.maxWordDiagnosticTimer = nil
-            self.nativeServiceDiagnostic.withWordScopeForDiagnostics { self.monitor.triggerForDiagnostics() }
-        }
-        maxWordDiagnosticTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
     func applicationDidBecomeActive(_ notification: Notification) { refreshPermissions() }
     func menuWillOpen(_ menu: NSMenu) { refreshPermissions(); rebuildMenu() }
 
@@ -311,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let frames = NSScreen.screens.map(\.frame).reduce(into: [CGRect]()) { unique, frame in
             if !unique.contains(frame) { unique.append(frame) }
         }
-        if windowMovementEnabled && !nativeServiceDiagnostic.isConverting && AXIsProcessTrusted() &&
+        if windowMovementEnabled && !nativeServices.isConverting && AXIsProcessTrusted() &&
             CGPreflightListenEventAccess() && monitor.isRunning && frames.count >= 2 {
             windowHotKeys.start()
         } else {
@@ -452,21 +431,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.windowMoves.lastResult,
                     self.editor.overlay.lastStatus,
                     self.editor.performance.diagnosticStatus,
-                    self.maxFocusDiagnostic.status,
-                    self.nativeServiceDiagnostic.status,
-                    self.nativeServiceDiagnostic.conversionStatus
+                    self.nativeServices.conversionStatus
                 ].joined(separator: "\n")
             }, runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() },
-               runMaxCheck: { [weak self] in
-                   guard let self else { return }
-                   self.nativeServiceDiagnostic.withWordScopeForDiagnostics { self.monitor.triggerForDiagnostics() }
-               },
-               requestCapture: { [weak self] in self?.requestScreenCapture() },
-               checkMaxFocus: { [weak self] in self?.maxFocusDiagnostic.start() },
-               cancelMaxFocus: { [weak self] in self?.maxFocusDiagnostic.cancel() },
-               checkMaxService: { [weak self] in self?.nativeServiceDiagnostic.arm() },
-               convertMaxSelection: { [weak self] in self?.nativeServiceDiagnostic.armConversion() },
-               cancelMaxService: { [weak self] in self?.nativeServiceDiagnostic.cancel() })
+               requestCapture: { [weak self] in self?.requestScreenCapture() })
         }
         diagnosticsWindow?.present(activateApplication: activateApplication)
     }
@@ -482,9 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        maxWordDiagnosticTimer?.invalidate(); maxWordDiagnosticTimer = nil
-        maxFocusDiagnostic.cancel()
-        nativeServiceDiagnostic.cancel()
+        nativeServices.cancel()
         NSApp.servicesProvider = nil
         windowHotKeys.stop()
         windowMoves.cancel()

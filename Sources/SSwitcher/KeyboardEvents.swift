@@ -3,8 +3,6 @@ import Foundation
 import SwitcherCore
 
 enum KeyboardEvents {
-    private(set) static var lastNavigationModifiers: CGEventFlags = []
-    private(set) static var lastNavigationHasSpecialCharacter = false
     private static var delivery = KeyboardEventDelivery()
     private static var deliveryCompletion: ((Bool) -> Void)?
     private static var deliveryTimeout: DispatchWorkItem?
@@ -61,13 +59,6 @@ enum KeyboardEvents {
     static func received(_ event: CGEvent, fromTarget: Bool = false) -> Bool {
         let token = event.getIntegerValueField(.eventSourceUserData)
         guard KeyboardEventDelivery.isSynthetic(marker: token) else { return false }
-        if event.type == .keyDown, [123, 124, 125, 126, 80, 90].contains(event.getIntegerValueField(.keyboardEventKeycode)) {
-            lastNavigationModifiers = event.flags.intersection([.maskShift, .maskCommand, .maskControl, .maskAlternate])
-            var character: UniChar = 0
-            var count = 0
-            event.keyboardGetUnicodeString(maxStringLength: 1, actualStringLength: &count, unicodeString: &character)
-            lastNavigationHasSpecialCharacter = count == 1 && (0xf700...0xf717).contains(character)
-        }
         if event.type == .keyUp, (targetTap == nil || fromTarget),
            delivery.acknowledge(marker: token) { completeDelivery(true) }
         return true

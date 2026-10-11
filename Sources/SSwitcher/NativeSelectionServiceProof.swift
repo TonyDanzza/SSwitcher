@@ -3,74 +3,40 @@ import Carbon
 import InputMethodSupport
 import SwitcherCore
 
-/// Native selected-text and word Services paths plus explicitly armed diagnostics.
-/// Window identity is captured
-/// outside the service callback: the waiting host must never receive AX IPC.
-/// Publishing a response is not acknowledgement of editor text or its caret.
+/// Native selected-text and word Services paths for one MAX gesture.
+/// Window identity is captured outside the service callback: the waiting host
+/// must never receive AX IPC. Publishing a response is not acknowledgement of
+/// editor text or its caret.
 final class NativeSelectionServiceProof {
     fileprivate struct WindowIdentity {
         let pid: pid_t
         let window: AXUIElement
         let sourceID: String
     }
-    private final class Grant {
-        let identity: WindowIdentity
-        let deadline: ReadinessDeadline
-        var editableProbeCount = 0
-        var editableActionAccepted = false
-        var keyboardProbeStarted = false
-        var keyboardProbeFinished = false
-        var keyboardDelivered: Bool?
-        var keyboardDeadline: ReadinessDeadline?
-        var keyboardExpiry: DispatchWorkItem?
-        init(identity: WindowIdentity, deadline: ReadinessDeadline) {
-            self.identity = identity
-            self.deadline = deadline
-        }
-        deinit { keyboardExpiry?.cancel() }
-    }
-    struct Readback {
-        fileprivate let text: String
-        fileprivate let identity: WindowIdentity
-        let deadline: ReadinessDeadline
-        func matches(_ packet: String) -> Bool { text.utf16.elementsEqual(packet.utf16) }
-    }
-    private struct Expected {
-        let text: String
-        let identity: WindowIdentity
-        let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: 60)
-    }
-    private var grant: Grant?
-    private var expected: Expected?
-    private var expiry: DispatchWorkItem?
-    private var activationObserver: NSObjectProtocol?
-    private var waitingDeadline: ReadinessDeadline?
-    private var readbackCompletion: ((Readback?, String?) -> Void)?
-    private let menuWorker = DispatchQueue(label: "SSwitcher.native-service-menu", qos: .userInitiated)
-    private var menuCancellation: AttemptCancellation?
-    private var editableCancellation: AttemptCancellation?
-    private var generation = 0
-    private let visualShield = NativeWordVisualShield()
     private final class Automatic {
         let identity: WindowIdentity
+        let deadline: ReadinessDeadline
         let valid: () -> Bool
         let completion: (NativeServiceDispatchState.Outcome, TISInputSource?) -> Void
         var state = NativeServiceDispatchState()
         var target: TISInputSource?
         var word: NativeWordServiceCoordinator?
         var failure: String?
-        init(identity: WindowIdentity, valid: @escaping () -> Bool,
+        /// One response publication per gesture; the first callback consumes it.
+        var commitAvailable = true
+        init(identity: WindowIdentity, deadline: ReadinessDeadline, valid: @escaping () -> Bool,
              completion: @escaping (NativeServiceDispatchState.Outcome, TISInputSource?) -> Void) {
-            self.identity = identity; self.valid = valid; self.completion = completion
+            self.identity = identity; self.deadline = deadline; self.valid = valid; self.completion = completion
         }
     }
+    private var expiry: DispatchWorkItem?
+    private let boundsWorker = DispatchQueue(label: "SSwitcher.native-window-bounds", qos: .userInitiated)
+    private var generation = 0
+    private let visualShield = NativeWordVisualShield()
     private var automatic: Automatic?
     private(set) var status = "Служба выделения MAX: не запускалась"
 
-    var hasExpectedResponse: Bool { expected != nil }
-    var isConverting: Bool {
-        automatic != nil || (grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false)
-    }
+    var isConverting: Bool { automatic != nil }
 
     /// Text the last submitted direct word conversion produced, for the
     /// caller's typed-word memory. Cleared by the next request.
@@ -84,9 +50,8 @@ final class NativeSelectionServiceProof {
         let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.nativeWordDeadline)
         let capture = captureWindow(armDeadline: deadline)
         guard valid(), let identity = capture.identity else { completion(.cancelled, nil); return }
-        let request = Automatic(identity: identity, valid: valid, completion: completion)
+        let request = Automatic(identity: identity, deadline: deadline, valid: valid, completion: completion)
         automatic = request
-        grant = Grant(identity: identity, deadline: deadline)
         let epoch = generation
         record(["stage": "nativeResponderRequest", "automatic": true, "windowProvenAtArm": true])
         expire(after: max(0, deadline.expiresAt - ProcessInfo.processInfo.systemUptime), epoch: epoch)
@@ -120,9 +85,9 @@ final class NativeSelectionServiceProof {
                 guard let self, let request, self.generation == epoch, self.automatic === request else { return }
                 // Capture only when navigation will be needed, and never make
                 // remote AX calls inside a synchronous Services callback.
-                self.menuWorker.async { [weak self, weak request] in
+                self.boundsWorker.async { [weak self, weak request] in
                     guard let self, let request else { return }
-                    let bounds = NativeServiceMenuResolver.windowBounds(identity.window, pid: identity.pid)
+                    let bounds = NativeWindowLocator.windowBounds(identity.window, pid: identity.pid)
                     DispatchQueue.main.async { [weak self, weak request] in
                         guard let self, let request, self.generation == epoch, self.automatic === request else { return }
                         self.visualShield.prepare(bounds: bounds, valid: { [weak self, weak request] in
@@ -157,8 +122,8 @@ final class NativeSelectionServiceProof {
         guard Thread.isMainThread, automatic == nil else { return }
         let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.nativeVisualEarlyClaim)
         guard let identity = captureWindow(armDeadline: deadline).identity else { return }
-        menuWorker.async { [weak self] in
-            let bounds = NativeServiceMenuResolver.windowBounds(identity.window, pid: identity.pid)
+        boundsWorker.async { [weak self] in
+            let bounds = NativeWindowLocator.windowBounds(identity.window, pid: identity.pid)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.automatic == nil || self.automatic?.identity.pid == identity.pid, valid() else { return }
                 self.visualShield.prepareEarly(bounds: bounds, valid: valid)
@@ -167,11 +132,7 @@ final class NativeSelectionServiceProof {
     }
 
     func cancelAutomatic() {
-        guard Thread.isMainThread else { return }
-        guard let automatic else {
-            if grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false { cancelArm() }
-            return
-        }
+        guard Thread.isMainThread, let automatic else { return }
         finishAutomatic(automatic.state.stopped(cancelled: true))
     }
 
@@ -182,8 +143,6 @@ final class NativeSelectionServiceProof {
         if outcome == .submitted { lastDirectConversion = request.word?.convertedText }
         request.word?.cancel()
         automatic = nil
-        grant = nil
-        menuCancellation?.cancel(); menuCancellation = nil
         expiry?.cancel(); expiry = nil
         generation += 1
         // Closing a pending snapshot can synchronously resume preparation.
@@ -210,305 +169,33 @@ final class NativeSelectionServiceProof {
         }
     }
 
-    func arm() {
-        guard Thread.isMainThread else { return }
-        let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: 60)
-        cancel()
-        beginWaiting(deadline: deadline)
-        // Menu discovery is readonly and can inspect the named running MAX
-        // while our diagnostic window is active. It grants no conversion.
-        let applications = NSRunningApplication.runningApplications(withBundleIdentifier: "ru.oneme.desktop")
-            .filter { !$0.isTerminated }
-        if applications.count == 1, let app = applications.first {
-            inspectMenu(pid: app.processIdentifier, epoch: generation)
-        }
-    }
-
-    func cancelArm() {
-        guard Thread.isMainThread, grant != nil || waitingDeadline != nil else { return }
-        let completion = readbackCompletion
-        if grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false { KeyboardEvents.cancelDelivery() }
-        if completion != nil { expected = nil }
-        readbackCompletion = nil; waitingDeadline = nil
-        grant = nil
-        menuCancellation?.cancel(); menuCancellation = nil
-        editableCancellation?.cancel(); editableCancellation = nil
-        detachActivation()
-        expiry?.cancel(); expiry = nil
-        generation += 1
-        status = "Служба выделения MAX: попытка отменена"
-        record(["stage": "cancelled"])
-        completion?(nil, "cancelled")
-    }
-
     func cancel(keepingEarlyShield: Bool = false) {
         guard Thread.isMainThread else { return }
         cancelAutomatic()
         if !keepingEarlyShield { visualShield.cancel() }
-        let wasArmed = grant != nil || waitingDeadline != nil
-        if grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false { KeyboardEvents.cancelDelivery() }
-        let completion = readbackCompletion
-        readbackCompletion = nil; waitingDeadline = nil
-        grant = nil; expected = nil
-        menuCancellation?.cancel(); menuCancellation = nil
-        editableCancellation?.cancel(); editableCancellation = nil
-        detachActivation()
         expiry?.cancel(); expiry = nil
         generation += 1
-        if wasArmed {
-            status = "Служба выделения MAX: попытка отменена"
-            record(["stage": "cancelled", "callCount": 0])
-        }
-        completion?(nil, "cancelled")
     }
 
-    /// Explicit readback arm, before MAX waits for the readonly provider.
-    /// Keep one expectation until matching activation, cancellation or expiry;
-    /// its original deadline is never extended.
-    func takeReadback(completion: @escaping (Readback?, String?) -> Void) {
-        guard Thread.isMainThread else { return }
-        guard let deadline = expected?.deadline else { completion(nil, "expectedUnavailable"); return }
-        expiry?.cancel(); expiry = nil
-        generation += 1
-        readbackCompletion = completion
-        beginWaiting(deadline: deadline)
-    }
-
-    /// Only an explicit click installs this finite observer. Its closure keeps
-    /// an epoch, never a payload; activation cannot extend either deadline.
-    private func beginWaiting(deadline: ReadinessDeadline) {
-        detachActivation()
-        waitingDeadline = deadline
-        let epoch = generation
-        status = "Служба MAX: перейдите в MAX до окончания разрешения"
-        record(["stage": "waitingForMAX", "reason": "foreground", "windowProvenAtArm": false])
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.prepareActivatedWindow(epoch: epoch) }
-        expire(after: max(0, deadline.expiresAt - ProcessInfo.processInfo.systemUptime), epoch: epoch)
-        prepareActivatedWindow(epoch: epoch)
-    }
-
-    private func prepareActivatedWindow(epoch: Int) {
-        guard generation == epoch, let deadline = waitingDeadline else { return }
-        if deadline.expired(at: ProcessInfo.processInfo.systemUptime) { rejectWaiting("expired"); return }
-        if !AXIsProcessTrusted() { rejectWaiting("permission"); return }
-        if IsSecureEventInputEnabled() { rejectWaiting("secure"); return }
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop" else { return }
-        let capture = captureWindow(armDeadline: deadline)
-        guard generation == epoch, waitingDeadline != nil else { return }
-        guard let identity = capture.identity else { rejectWaiting(capture.reason, axError: capture.error); return }
-        guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else { rejectWaiting("expired"); return }
-        detachActivation()
-        waitingDeadline = nil
-        if let completion = readbackCompletion {
-            readbackCompletion = nil
-            guard let response = expected, identity.pid == response.identity.pid,
-                  identity.sourceID == response.identity.sourceID, CFEqual(identity.window, response.identity.window) else {
-                expected = nil
-                expiry?.cancel(); expiry = nil
-                finish("readbackArmRejected", report: ["reason": "axWindow", "windowProvenAtArm": false])
-                completion(nil, "axWindow"); return
-            }
-            expected = nil
-            expiry?.cancel(); expiry = nil
-            status = "Служба MAX: исходное окно для проверки подтверждено"
-            completion(Readback(text: response.text, identity: response.identity, deadline: response.deadline), nil)
-        } else {
-            grant = Grant(identity: identity, deadline: deadline)
-            status = "Служба MAX: одна замена выделения разрешена до окончания минуты"
-            record(["stage": "armed", "windowProvenAtArm": true])
-            if let grant { inspectEditableRequestor(grant, epoch: epoch) }
-        }
-    }
-
-    /// Explicit diagnostic arm only. One zero-write service is invoked on the
-    /// same native window immediately after real MAX activation. The provider
-    /// always returns an error; discovery/dispatch are not text-edit authority.
-    private func inspectEditableRequestor(_ request: Grant, epoch: Int) {
-        let cancellation = AttemptCancellation()
-        editableCancellation?.cancel()
-        editableCancellation = cancellation
-        let identity = request.identity
-        menuWorker.async { [weak self] in
-            let result = NativeServiceMenuResolver.inspect(pid: identity.pid, cancellation: cancellation,
-                                                          serviceTitle: NativeServiceMenuResolver.editableTitle)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == epoch, self.grant === request,
-                      !cancellation.isCancelled else { return }
-                var report = result.report
-                report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-                UserDefaults.standard.set(report, forKey: "NativeEditableMenuReport")
-                guard let item = result.item, !request.deadline.expired(at: ProcessInfo.processInfo.systemUptime),
-                      self.foregroundMatches(identity), self.ordinarySourceID() == identity.sourceID,
-                      !IsSecureEventInputEnabled() else { return }
-                self.menuWorker.async { [weak self] in
-                    let reply = NativeServiceMenuResolver.press(item, pid: identity.pid, window: identity.window,
-                        cancellation: cancellation, serviceTitle: NativeServiceMenuResolver.editableTitle)
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, self.generation == epoch, self.grant === request,
-                              !cancellation.isCancelled else { return }
-                        var report: [String: Any] = ["actionIssued": reply != nil,
-                                                    "actionAccepted": reply == .success,
-                                                    "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""]
-                        if let reply { report["AXError"] = reply.rawValue }
-                        UserDefaults.standard.set(report, forKey: "NativeEditableDispatchReport")
-                        request.editableActionAccepted = reply == .success
-                        self.beginKeyboardProbeIfReady(request, epoch: epoch)
-                    }
-                }
-            }
-        }
-    }
-
-    private func beginKeyboardProbeIfReady(_ request: Grant, epoch: Int) {
-        guard generation == epoch, grant === request, request.editableActionAccepted,
-              request.editableProbeCount == 1, !request.keyboardProbeStarted,
-              !request.deadline.expired(at: ProcessInfo.processInfo.systemUptime),
-              foregroundMatches(request.identity), ordinarySourceID() == request.identity.sourceID,
-              !IsSecureEventInputEnabled() else { return }
-        // Run only after the initial service callback and its AX action have
-        // both returned. There must be no AX IPC to a waiting Services host.
-        let fresh = captureWindow(armDeadline: request.deadline)
-        let system = AXUIElementCreateSystemWide()
-        var focusedApplication: CFTypeRef?
-        _ = AXUIElementSetMessagingTimeout(system, 0.12)
-        let focusedResult = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &focusedApplication)
-        var focusedPID: pid_t = 0
-        let focusedElement = AccessibilityElementReply(error: focusedResult, value: focusedApplication).element
-        let systemFocusMatches = focusedElement.map { AXUIElementGetPid($0, &focusedPID) == .success && focusedPID == request.identity.pid } ?? false
-        UserDefaults.standard.set(["systemFocusMatches": systemFocusMatches, "ownApplicationActive": NSApp.isActive,
-                                  "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-                                 forKey: "NativeKeyboardFocusReport")
-        guard let identity = fresh.identity, CFEqual(identity.window, request.identity.window),
-              identity.pid == request.identity.pid, identity.sourceID == request.identity.sourceID,
-              NativeServiceMenuResolver.isOnBuiltInDisplay(identity.window, pid: identity.pid),
-              let events = NativeServiceBarrierEvents.probe(), foregroundMatches(request.identity),
-              ordinarySourceID() == request.identity.sourceID, !IsSecureEventInputEnabled(),
-              !request.deadline.expired(at: ProcessInfo.processInfo.systemUptime) else { return }
-        request.keyboardProbeStarted = true
-        let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: 0.6)
-        request.keyboardDeadline = deadline
-        let timeout = DispatchWorkItem { [weak self, weak request] in
-            guard let self, let request, self.generation == epoch, self.grant === request else { return }
-            self.finishKeyboardProbe(request, timedOut: true)
-        }
-        request.keyboardExpiry = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: timeout)
-        KeyboardEvents.postAndAwaitDelivery(events, postingTap: .cgSessionEventTap) { [weak self, weak request] delivered in
-            guard let self, let request, self.generation == epoch, self.grant === request else { return }
-            request.keyboardDelivered = delivered
-            self.finishKeyboardProbe(request, timedOut: deadline.expired(at: ProcessInfo.processInfo.systemUptime))
-        }
-    }
-
-    private func finishKeyboardProbe(_ request: Grant, timedOut: Bool) {
-        guard !request.keyboardProbeFinished else { return }
-        let nativeInvoked = request.editableProbeCount == 2
-        let delivered = request.keyboardDelivered == true
-        guard timedOut || request.keyboardDelivered == false || (delivered && nativeInvoked) else { return }
-        request.keyboardProbeFinished = true
-        request.keyboardExpiry?.cancel(); request.keyboardExpiry = nil
-        let context = foregroundMatches(request.identity) && ordinarySourceID() == request.identity.sourceID &&
-            !IsSecureEventInputEnabled()
-        UserDefaults.standard.set([
-            "stage": delivered && nativeInvoked && context && !timedOut ? "nativeKeyboardRequestConfirmed" : "unconfirmed",
-            "eventDelivered": delivered, "nativeRequestorInvoked": nativeInvoked,
-            "contextUnchanged": context, "timedOut": timedOut,
-            "specialCharacterDelivered": KeyboardEvents.lastNavigationHasSpecialCharacter,
-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        ] as [String: Any], forKey: "NativeKeyboardBarrierReport")
-    }
-
-    private func inspectMenu(pid: pid_t, epoch: Int) {
-        menuCancellation?.cancel()
-        let cancellation = AttemptCancellation()
-        menuCancellation = cancellation
-        menuWorker.async { [weak self] in
-            let result = NativeServiceMenuResolver.inspect(pid: pid, cancellation: cancellation, inspectEditor: true)
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == epoch, !cancellation.isCancelled else { return }
-                self.recordMenu(result.report)
-            }
-        }
-    }
-
-    private func recordMenu(_ report: [String: Any]) {
-        var report = report
-        report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        UserDefaults.standard.set(report, forKey: "NativeServiceMenuReport")
-    }
-
-    private func rejectWaiting(_ reason: String, axError: AXError? = nil) {
-        let completion = readbackCompletion
-        readbackCompletion = nil; waitingDeadline = nil
-        if completion != nil { expected = nil }
-        detachActivation()
-        expiry?.cancel(); expiry = nil
-        var report: [String: Any] = ["reason": reason, "windowProvenAtArm": false, "callCount": 0]
-        if let axError { report["AXError"] = axError.rawValue }
-        finish(completion == nil ? "armRejected" : "readbackArmRejected", report: report)
-        completion?(nil, reason)
-    }
-
-    private func detachActivation() {
-        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
-        activationObserver = nil
-    }
-
-    func readbackContextMatches(_ readback: Readback) -> Bool {
-        foregroundMatches(readback.identity) && ordinarySourceID() == readback.identity.sourceID &&
-            !readback.deadline.expired(at: ProcessInfo.processInfo.systemUptime)
-    }
-
-    /// Return-only requestor diagnostic: AppKit can validate an editable native
-    /// client even at an empty selection. Never return replacement data.
-    func probeEditable(_ packet: NSPasteboard, error: AutoreleasingUnsafeMutablePointer<NSString?>?) {
+    /// Return-only requestor (Cmd+F20): a barrier proving that MAX finished
+    /// the preceding request. Never returns replacement data.
+    func receiveBarrier(_ packet: NSPasteboard, error: AutoreleasingUnsafeMutablePointer<NSString?>?) {
         guard let error else { return }
         error.pointee = "SSwitcher: проверка ввода завершена, текст не изменён" as NSString
-        if Thread.isMainThread, let request = automatic, request.word != nil, request.valid(),
-           foregroundMatches(request.identity), ordinarySourceID() == request.identity.sourceID,
-           !IsSecureEventInputEnabled(), ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(packet.name) {
-            // A barrier is a successful zero-write request, not a diagnostic
-            // error. Clear only this dedicated packet; never return an empty
-            // string or let stale formats reinsert text in Qt.
-            guard NativeServicePacket.discardReturnValue(packet) else { return }
-            error.pointee = nil
-            request.word?.receiveBarrier()
-            return
-        }
-        guard Thread.isMainThread, automatic == nil, let request = grant, request.editableProbeCount < 2,
-              !request.deadline.expired(at: ProcessInfo.processInfo.systemUptime) else { return }
-        if request.editableProbeCount == 1 {
-            guard request.keyboardProbeStarted, !request.keyboardProbeFinished, let deadline = request.keyboardDeadline,
-                  !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else { return }
-        }
-        let secure = !IsSecureEventInputEnabled()
-        let foreground = foregroundMatches(request.identity)
-        let ordinary = ordinarySourceID() == request.identity.sourceID
-        let privateBoard = ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(packet.name)
-        guard secure, foreground, ordinary, privateBoard else { return }
-        request.editableProbeCount += 1
-        UserDefaults.standard.set([
-            "stage": "nativeRequestorInvoked", "callCount": request.editableProbeCount,
-            "privateBoard": true, "secureGuardPassed": true, "foregroundMAX": true,
-            "ordinarySourceUnchanged": true,
-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        ] as [String: Any], forKey: "NativeEditableServiceReport")
-        if request.editableProbeCount == 1 {
-            let epoch = generation
-            DispatchQueue.main.async { [weak self, weak request] in
-                guard let self, let request else { return }
-                self.beginKeyboardProbeIfReady(request, epoch: epoch)
-            }
-        } else {
-            finishKeyboardProbe(request, timedOut: false)
-        }
+        guard Thread.isMainThread, let request = automatic, request.word != nil, request.valid(),
+              foregroundMatches(request.identity), ordinarySourceID() == request.identity.sourceID,
+              !IsSecureEventInputEnabled(), ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(packet.name) else { return }
+        // A barrier is a successful zero-write request, not a diagnostic
+        // error. Clear only this dedicated packet; never return an empty
+        // string or let stale formats reinsert text in Qt.
+        guard NativeServicePacket.discardReturnValue(packet) else { return }
+        error.pointee = nil
+        request.word?.receiveBarrier()
     }
 
-    /// The existing two-way native request performs the word replacement in
-    /// its first callback only while our current gesture owns the commit.
-    /// Diagnostics and boundary reads remain zero-write.
+    /// The two-way native request performs the word replacement in its first
+    /// callback only while our current gesture owns the commit. Boundary reads
+    /// remain zero-write.
     func convertWordPacketIfRequested(_ packet: NSPasteboard,
         error: AutoreleasingUnsafeMutablePointer<NSString?>?) -> Bool {
         guard Thread.isMainThread, automatic?.word?.isAwaitingConversion == true else { return false }
@@ -535,25 +222,20 @@ final class NativeSelectionServiceProof {
         return true
     }
 
-    func convert(_ pasteboard: NSPasteboard, error: AutoreleasingUnsafeMutablePointer<NSString?>?) {
+    private func convert(_ pasteboard: NSPasteboard, error: AutoreleasingUnsafeMutablePointer<NSString?>?) {
         guard let error else { return }
         error.pointee = "SSwitcher: замена выделения не выполнена" as NSString
         defer {
             if error.pointee != nil { NativeServicePacket.discardReturnValue(pasteboard) }
         }
-        guard Thread.isMainThread, let request = grant else { return }
-        grant = nil
-        if automatic == nil {
-            menuCancellation?.cancel(); menuCancellation = nil
-            editableCancellation?.cancel(); editableCancellation = nil
-        }
-        if automatic == nil { expiry?.cancel(); expiry = nil }
+        guard Thread.isMainThread, let request = automatic, request.commitAvailable else { return }
+        request.commitAvailable = false
         let epoch = generation
         let callbackStartedAt = ProcessInfo.processInfo.systemUptime
         let callback = ReadinessDeadline(start: callbackStartedAt, timeout: 0.6)
         var report: [String: Any] = ["callCount": 1, "hasErrorPointer": true, "windowProvenAtArm": true,
                                      "windowRevalidatedInCallback": false,
-                                     "wordRequest": automatic?.word != nil]
+                                     "wordRequest": request.word != nil]
         func ready() -> Bool {
             let secure = !IsSecureEventInputEnabled()
             let foreground = foregroundMatches(request.identity)
@@ -618,11 +300,9 @@ final class NativeSelectionServiceProof {
         report["responsePublished"] = published
         guard published else { complete("responsePublishFailed"); return }
         guard ready() else { complete("responsePublishedUnverified"); return }
-        if let automatic { automatic.target = conversion.target }
-        else { expected = Expected(text: conversion.text, identity: request.identity) }
+        automatic?.target = conversion.target
         error.pointee = nil
         complete("responsePublished")
-        if automatic == nil { expire(after: 60, epoch: epoch) }
     }
 
     private func foregroundMatches(_ identity: WindowIdentity) -> Bool {
@@ -639,8 +319,8 @@ final class NativeSelectionServiceProof {
         return id
     }
 
-    /// The only remote AX entry in this component, called by explicit arm
-    /// actions, never from a Services handler while the host waits for us.
+    /// Remote AX for the gesture start and before each key batch, never from
+    /// a Services handler while the host waits for us.
     private func captureWindow(armDeadline: ReadinessDeadline) -> (identity: WindowIdentity?, reason: String, error: AXError?) {
         let now = ProcessInfo.processInfo.systemUptime
         let deadline = ReadinessDeadline(start: now, timeout: max(0, min(0.36, armDeadline.expiresAt - now)))
@@ -702,27 +382,12 @@ final class NativeSelectionServiceProof {
     private func expire(after delay: Double, epoch: Int) {
         guard generation == epoch else { return }
         let timeout = DispatchWorkItem { [weak self] in
-            guard let self, self.generation == epoch else { return }
-            if let automatic = self.automatic {
-                self.finishAutomatic(automatic.state.stopped(cancelled: false)); return
-            }
-            if self.waitingDeadline != nil { self.rejectWaiting("expired"); return }
-            let wasArmed = self.grant != nil
-            self.grant = nil; self.expected = nil; self.expiry = nil
-            self.menuCancellation?.cancel(); self.menuCancellation = nil
-            self.editableCancellation?.cancel(); self.editableCancellation = nil
-            self.generation += 1
-            self.status = "Служба MAX: время разрешения или проверки истекло"
-            if wasArmed { self.record(["stage": "expired", "callCount": 0]) }
+            guard let self, self.generation == epoch, let automatic = self.automatic else { return }
+            self.finishAutomatic(automatic.state.stopped(cancelled: false))
         }
         expiry = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: timeout)
     }
 
-    deinit {
-        menuCancellation?.cancel()
-        editableCancellation?.cancel()
-        expiry?.cancel()
-        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
-    }
+    deinit { expiry?.cancel() }
 }

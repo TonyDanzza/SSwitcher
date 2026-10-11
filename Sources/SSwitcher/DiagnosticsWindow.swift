@@ -6,33 +6,16 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
     private var timer: Timer?
     private let readStatus: () -> String
     private let runCheck: () -> Void
-    private let runMaxCheck: () -> Void
     private let requestCapture: () -> Void
-    private let checkMaxFocus: () -> Void
-    private let cancelMaxFocus: () -> Void
-    private let checkMaxService: () -> Void
-    private let convertMaxSelection: () -> Void
-    private let cancelMaxService: () -> Void
     private let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 100))
     private let fixtureStatus = NSTextField(labelWithString: "")
     private var fixtureNeighbors: (prefix: NSAttributedString, suffix: NSAttributedString)?
-    private var maxCheckTimer: Timer?
 
-    init(readStatus: @escaping () -> String, runCheck: @escaping () -> Void, runMaxCheck: @escaping () -> Void,
-         requestCapture: @escaping () -> Void,
-         checkMaxFocus: @escaping () -> Void, cancelMaxFocus: @escaping () -> Void,
-         checkMaxService: @escaping () -> Void, convertMaxSelection: @escaping () -> Void,
-         cancelMaxService: @escaping () -> Void) {
+    init(readStatus: @escaping () -> String, runCheck: @escaping () -> Void, requestCapture: @escaping () -> Void) {
         self.readStatus = readStatus
         self.runCheck = runCheck
-        self.runMaxCheck = runMaxCheck
         self.requestCapture = requestCapture
-        self.checkMaxFocus = checkMaxFocus
-        self.cancelMaxFocus = cancelMaxFocus
-        self.checkMaxService = checkMaxService
-        self.convertMaxSelection = convertMaxSelection
-        self.cancelMaxService = cancelMaxService
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 880),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 800),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Проверка SSwitcher"
         window.isReleasedWhenClosed = false
@@ -86,7 +69,6 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         scroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: 100).isActive = true
         let checks = NSStackView(views: [NSButton(title: "Проверить замену текста", target: self, action: #selector(check)),
-                                         NSButton(title: "Проверить поле MAX", target: self, action: #selector(checkMax)),
                                          NSButton(title: "Переместить проверку на MacBook", target: self, action: #selector(moveToMacBook))])
         checks.orientation = .horizontal
         checks.spacing = 12
@@ -101,15 +83,6 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         content.addArrangedSubview(fixtures)
         fixtureStatus.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(fixtureStatus)
-        let services = NSStackView(views: [
-            NSButton(title: "Проверить службу MAX", target: self, action: #selector(checkService)),
-            NSButton(title: "Разрешить замену выделения MAX", target: self, action: #selector(convertService))
-        ])
-        services.orientation = .horizontal
-        services.spacing = 12
-        content.addArrangedSubview(services)
-        content.addArrangedSubview(NSButton(title: "Проверить замену после перехода в MAX", target: self,
-                                           action: #selector(checkAfterMaxActivation)))
         let actions = NSStackView(views: [NSButton(title: "Разрешить анимацию замены…", target: self, action: #selector(allowCapture)),
                                          NSButton(title: "Скопировать диагностику", target: self, action: #selector(copyDiagnostics))])
         actions.orientation = .horizontal
@@ -140,11 +113,8 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        cancelPendingMaxCheck()
         timer?.invalidate()
         timer = nil
-        cancelMaxFocus()
-        cancelMaxService()
     }
     func windowDidMiniaturize(_ notification: Notification) { timer?.invalidate(); timer = nil }
     func windowDidDeminiaturize(_ notification: Notification) { startUpdates() }
@@ -187,48 +157,6 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.runCheck() }
     }
 
-    @objc private func checkMax() { checkMaxFocus(); status.stringValue = readStatus() }
-    @objc private func checkService() { checkMaxService(); status.stringValue = readStatus() }
-    @objc private func convertService() { convertMaxSelection(); status.stringValue = readStatus() }
-
-    /// Explicit, one-shot diagnostic. It neither activates MAX nor posts keys
-    /// until the user activates that application; the regular converter still
-    /// verifies the native window, input generation and secure-input state.
-    @objc private func checkAfterMaxActivation() {
-        // Hide our owned window before waiting, so its key focus cannot undo
-        // a foreground notification between arm and dispatch.
-        window?.orderOut(nil)
-        runAfterMaxActivation { [weak self] in self?.runMaxCheck() }
-    }
-
-    private func runAfterMaxActivation(_ action: @escaping () -> Void) {
-        cancelPendingMaxCheck()
-        let deadline = ProcessInfo.processInfo.systemUptime + 60
-        UserDefaults.standard.set(["stage": "waitingForMAX", "build":
-            Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-            forKey: "NativeWordDiagnosticArmReport")
-        let pending = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                UserDefaults.standard.set(["stage": "activationExpired", "providerActive": NSApp.isActive,
-                    "foregroundMAX": NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop",
-                    "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-                    forKey: "NativeWordDiagnosticArmReport")
-                self.cancelPendingMaxCheck(); return
-            }
-            guard !NSApp.isActive,
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ru.oneme.desktop" else { return }
-            self.cancelPendingMaxCheck()
-            action()
-        }
-        maxCheckTimer = pending
-        RunLoop.main.add(pending, forMode: .common)
-    }
-
-    private func cancelPendingMaxCheck() {
-        maxCheckTimer?.invalidate(); maxCheckTimer = nil
-    }
-
     @objc private func attachmentWord() { prepareFixture(text: "ghbdtn", selected: false) }
     @objc private func attachmentSelection() { prepareFixture(text: "ghbdtn", selected: true) }
     @objc private func multilineSelection() { prepareFixture(text: "ghbdtn\nvbh 🙂 e\u{301}", selected: true) }
@@ -264,5 +192,5 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         if fixtureStatus.stringValue != message { fixtureStatus.stringValue = message }
     }
 
-    deinit { timer?.invalidate(); cancelPendingMaxCheck() }
+    deinit { timer?.invalidate() }
 }

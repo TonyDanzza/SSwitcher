@@ -3,7 +3,7 @@ import AppKit
 import CoreGraphics
 import SwitcherCore
 
-/// Immutable non-text request for the MAX-only return-type service. Context
+/// Immutable non-text key batches for the MAX Services transaction. Context
 /// and window ownership must be proved by the caller before dispatch.
 enum NativeServiceBarrierEvents {
     /// Preserve AppKit's native window routing while retaining the isolated
@@ -30,20 +30,15 @@ enum NativeServiceBarrierEvents {
         }
         return result
     }
-    static func probe() -> [CGEvent]? {
-        batch([])
-    }
-
-    static func batch(_ navigation: [(CGKeyCode, CGEventFlags)], appendProbe: Bool = true,
+    static func batch(_ navigation: [(CGKeyCode, CGEventFlags)],
                       state: CGEventSourceStateID = .privateState) -> [CGEvent]? {
         let modifiers: CGEventFlags = [.maskShift, .maskCommand, .maskControl, .maskAlternate]
         guard CGPreflightPostEventAccess(), !IsSecureEventInputEnabled(),
               CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty,
               !CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Function)),
               navigation.count <= 257 else { return nil }
-        let sequence = navigation + (appendProbe ? [(CGKeyCode(kVK_F20), CGEventFlags.maskCommand)] : [])
         // Synthetic modifiers must not become hardware state: the conversion
         // guard also checks real held Shift/Option keys between commands.
-        return KeyboardNavigationEvents.make(sequence, sourceMarker: KeyboardEventDelivery.sourceMarker, state: state)
+        return KeyboardNavigationEvents.make(navigation, sourceMarker: KeyboardEventDelivery.sourceMarker, state: state)
     }
 }
