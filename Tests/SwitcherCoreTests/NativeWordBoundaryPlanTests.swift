@@ -26,4 +26,17 @@ final class NativeWordBoundaryPlanTests: XCTestCase {
         XCTAssertFalse(plan.matches("é"))
         XCTAssertFalse(plan.matches("e\u{301} next"))
     }
+    func testDirectSelectionKeepsTrailingWhitespace() throws {
+        let plain = try XCTUnwrap(NativeWordBoundaryPlan(directSelection: "ghbdtn"))
+        XCTAssertEqual(plain.word, "ghbdtn")
+        XCTAssertEqual(plain.trailing, "")
+        let spaced = try XCTUnwrap(NativeWordBoundaryPlan(directSelection: "j,thtv \n"))
+        XCTAssertEqual(spaced.word, "j,thtv")
+        XCTAssertEqual(spaced.trailing, " \n")
+        XCTAssertTrue(spaced.matches("j,thtv \n"))
+        XCTAssertFalse(spaced.matches("j,thtv"))
+        for invalid in ["", "   ", "two words", " lead"] {
+            XCTAssertNil(NativeWordBoundaryPlan(directSelection: invalid), invalid)
+        }
+    }
 }

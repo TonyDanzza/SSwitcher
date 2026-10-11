@@ -20,6 +20,14 @@ final class NativeWordServiceCoordinator {
     private let beforeKeys: () -> Bool
     private let prepareWord: (@escaping () -> Void) -> Void
     private let completion: (Bool, String) -> Void
+    /// The caller tracked that no selection can exist, so the selection and
+    /// boundary probes (each followed by a native return settle) are skipped:
+    /// one Option+Shift+Left + conversion request replaces the word before
+    /// the caret, keeping whitespace the caret followed.
+    private let direct: Bool
+    /// Converted packet text after a published direct response, for the
+    /// caller's typed-word memory; never stored.
+    private(set) var convertedText: String?
     private var packet: Packet?
     private var timeout: DispatchWorkItem?
     private var finished = false
@@ -33,16 +41,25 @@ final class NativeWordServiceCoordinator {
     private var phase = "created"
     private(set) var status = "Проверяю слово MAX"
 
-    init(pid: pid_t, window: AXUIElement, valid: @escaping () -> Bool,
+    init(pid: pid_t, window: AXUIElement, direct: Bool = false, valid: @escaping () -> Bool,
          beforeKeys: @escaping () -> Bool,
          prepareWord: @escaping (@escaping () -> Void) -> Void,
          completion: @escaping (Bool, String) -> Void) {
-        self.pid = pid; self.window = window; self.valid = valid
+        self.pid = pid; self.window = window; self.direct = direct; self.valid = valid
         self.beforeKeys = beforeKeys; self.prepareWord = prepareWord; self.completion = completion
     }
 
     func start() {
         guard live else { return }
+        if direct {
+            phase = "preparingWord"
+            record("directWord")
+            prepareWord { [weak self] in
+                guard let self, self.live else { return }
+                self.selectWord()
+            }
+            return
+        }
         guard waitForModifiers({ [weak self] in self?.start() }) else { return }
         guard beforeKeys(), let number = NativeServiceMenuResolver.windowNumber(window, pid: pid),
               let raw = NativeServiceBarrierEvents.batch([
@@ -144,18 +161,23 @@ final class NativeWordServiceCoordinator {
 
     func permitsCommit(_ text: String) -> Bool {
         if live, committing, phase == "selection" { return NativeServicePayload.accepts(text) }
-        return live && committing && phase == "wordCommit" &&
-            NativeWordBoundaryPlan(selection: text) != nil &&
+        return live && committing && phase == "wordCommit" && wordPlan(text) != nil &&
             (plan == nil || plan?.matches(text) == true)
+    }
+
+    private func wordPlan(_ text: String) -> NativeWordBoundaryPlan? {
+        direct ? NativeWordBoundaryPlan(directSelection: text) : NativeWordBoundaryPlan(selection: text)
     }
 
     func prepareCommit(_ text: String) -> InputSources.Conversion? {
         if live, committing, phase == "selection", NativeServicePayload.accepts(text) {
             return InputSources.prepare(text)
         }
-        guard permitsCommit(text), let exact = NativeWordBoundaryPlan(selection: text),
-              let conversion = InputSources.prepare(exact.word) else { return nil }
+        guard permitsCommit(text), let exact = wordPlan(text),
+              let converted = InputSources.prepare(exact.word) else { return nil }
+        let conversion = InputSources.Conversion(text: converted.text + exact.trailing, target: converted.target)
         plan = exact
+        if direct { convertedText = conversion.text }
         UserDefaults.standard.set(["selectedGraphemes": text.count, "singleNativeCall": true,
             "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
             forKey: "NativeWordScopeReport")
@@ -177,6 +199,20 @@ final class NativeWordServiceCoordinator {
     private func completeCommit() {
         guard live, let outcome = commitState.completed else { return }
         timeout?.cancel(); timeout = nil
+        if direct, commitState.publication == false {
+            // The request reached us, so MAX holds our word selection.
+            // Collapse it to its right end (the original caret) after the
+            // requestor resumes, then report the refusal.
+            convertedText = nil
+            phase = "collapsing"
+            DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeServiceReturnSettle) { [weak self] in
+                guard let self, self.live else { return }
+                self.perform([(CGKeyCode(kVK_RightArrow), [])]) { [weak self] in
+                    self?.fail("Слово перед курсором не требует замены или не подходит для неё")
+                }
+            }
+            return
+        }
         guard outcome == .submitted else {
             fail("Нативная замена слова не подтверждена"); return
         }

@@ -26,4 +26,5 @@ enum ConversionTiming {
     static let nativeVisualPresentationSettle = 0.034
     static let nativeVisualCommitSettle = 0.1
     static let nativeVisualWatchdog = 1.0
+    static let nativeVisualEarlyClaim = 0.4
 }

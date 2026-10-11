@@ -67,6 +67,12 @@ public struct TypedWordTracker {
         run.append(replacement)
     }
 
+    /// Text read back from the editor itself now ends at the caret.
+    public mutating func assume(_ text: String) {
+        reset()
+        typed(text)
+    }
+
     /// One Backspace removes one of these characters in an ordinary editor.
     /// Composed or astral characters are refused rather than guessed.
     public static func backspaceCount(for word: String) -> Int? {

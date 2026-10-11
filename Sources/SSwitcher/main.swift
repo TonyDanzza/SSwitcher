@@ -83,7 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.nativeServiceDiagnostic.cancelConversion()
         }
         monitor.onWindowInteraction = { [weak self] in self?.windowMoves.userInteracted() }
-        monitor.onGestureRelease = { [weak self] time in self?.editor.performance.gestureReleased(at: time) }
+        monitor.onGestureRelease = { [weak self] time in
+            self?.editor.performance.gestureReleased(at: time)
+            // Called inside the event tap: start the MAX snapshot afterwards.
+            DispatchQueue.main.async { self?.prepareEarlyMaxShield() }
+        }
         monitor.onGestureCancelled = { [weak self] in self?.editor.performance.cancelGesture() }
         monitor.onBlockedGesture = { [weak self] in
             guard let self else { return }
@@ -120,31 +124,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     "translatedKeys": self.monitor.translatedKeysSinceReset, "timestamp": Date().timeIntervalSince1970,
                     "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
                     forKey: "TypedWordStateReport")
-                switch candidate {
-                case .afterSpace:
-                    self.lastResult = "Курсор должен стоять в конце слова"
-                    self.monitor.conversionFinished(unverified: false)
-                    self.statusItem.button?.toolTip = self.lastResult
-                    return
-                case .word(let word, let boundedStart):
-                    if self.retypeMaxWord(word, boundedStart: boundedStart, pid: max.processIdentifier, generation: generation) { return }
-                case .unknown: break
-                }
+                if case .word(let word, let boundedStart) = candidate,
+                   self.retypeMaxWord(word, boundedStart: boundedStart, pid: max.processIdentifier, generation: generation) { return }
+                // A typed word after a space may have been autocorrected, so
+                // the editor's own text is read with one native request.
+                let direct = self.monitor.selectionKnownEmpty
                 // Option-Shift-Left is also Qt's word-selection command.
                 // Exclusive Carbon registrations consume it even when their
                 // callback declines the move. Release them for this finite
                 // transaction, then restore the user's current preference.
                 self.windowHotKeys.stop()
                 self.windowMoves.cancel()
+                let started = ProcessInfo.processInfo.systemUptime
                 self.nativeServiceDiagnostic.convertAtCursor(valid: { [weak self] in
                     self?.monitor.inputGeneration == generation
-                }) { [weak self] outcome, target in
+                }, knownNoSelection: direct) { [weak self] outcome, target in
                     guard let self else { return }
                     self.refreshWindowShortcuts()
                     self.monitor.conversionFinished(unverified: outcome == .unverified)
+                    UserDefaults.standard.set(["direct": direct, "outcome": String(describing: outcome),
+                        "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+                        "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
+                        forKey: "MaxServiceRouteReport")
                     switch outcome {
                     case .submitted:
                         if let target { InputSources.selectAfterConversion(target) }
+                        if let text = self.nativeServiceDiagnostic.lastDirectConversion { self.monitor.assumeTypedWord(text) }
                         self.lastResult = "Текст передан нативному редактору MAX"
                     case .unavailable: self.lastResult = self.nativeServiceDiagnostic.conversionStatus
                     case .cancelled: self.lastResult = "Замена отменена: ввод или активное окно изменились"
@@ -196,6 +201,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--inspect-max-arrow-once") { NativeKeyboardEventProbe.start() }
     }
 
+    /// A direct MAX word request will need a snapshot; start it during the
+    /// Shift quiet interval instead of after it.
+    private func prepareEarlyMaxShield() {
+        guard enabled, monitor.tracksTypedWord, monitor.selectionKnownEmpty, !editor.isConverting,
+              !nativeServiceDiagnostic.isConverting, !typedReplacementActive,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Self.maxBundleID else { return }
+        if case .word = monitor.typedWordCandidate { return }
+        let generation = monitor.inputGeneration
+        nativeServiceDiagnostic.prepareEarlyShield(valid: { [weak self] in self?.monitor.inputGeneration == generation })
+    }
+
     /// Typed characters are kept only for MAX and only while conversion is on.
     private func refreshTypedWordTracking(frontmost: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
         monitor.tracksTypedWord = enabled && frontmost?.bundleIdentifier == Self.maxBundleID
@@ -229,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let elapsed = Int((ProcessInfo.processInfo.systemUptime - release) * 1000)
             if delivered {
                 self.monitor.replaceTypedWord(word, with: conversion.text)
+                self.monitor.assumeSelectionEmpty()
                 InputSources.selectAfterConversion(conversion.target)
                 self.lastResult = "Слово MAX перепечатано без выделения (\(elapsed) мс)"
             } else {

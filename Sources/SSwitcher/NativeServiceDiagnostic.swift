@@ -18,10 +18,11 @@ final class NativeServiceDiagnostic: NSObject {
     private let selectionProof = NativeSelectionServiceProof()
     var conversionStatus: String { selectionProof.status }
     var isConverting: Bool { selectionProof.isConverting }
-    func convertAtCursor(valid: @escaping () -> Bool,
+    var lastDirectConversion: String? { selectionProof.lastDirectConversion }
+    func convertAtCursor(valid: @escaping () -> Bool, knownNoSelection: Bool = false,
                          completion: @escaping (NativeServiceDispatchState.Outcome, TISInputSource?) -> Void) {
         cancelDiagnostic()
-        selectionProof.convertAtCursor(valid: valid, completion: completion)
+        selectionProof.convertAtCursor(valid: valid, knownNoSelection: knownNoSelection, completion: completion)
     }
 
     /// Explicit finite MAX diagnostic, scoped to the built-in display.
@@ -55,6 +56,7 @@ final class NativeServiceDiagnostic: NSObject {
         selectionProof.cancelVisualShield()
     }
     func cancelVisualShield() { selectionProof.cancelVisualShield() }
+    func prepareEarlyShield(valid: @escaping () -> Bool) { selectionProof.prepareEarlyShield(valid: valid) }
     private var generation: Grant?
     private var generationNumber = 0
     private var waitingForReadback = false

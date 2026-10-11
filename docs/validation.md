@@ -1,6 +1,18 @@
-# Validation — 0.1.23 / build 168
+# Validation — 0.1.23 / build 173
 
-## Freshly typed MAX word — builds 165–168
+## Already written MAX word — builds 169–173
+
+The user reported that a word typed earlier converted slowly. Reports confirmed it used the full Services route (about 600 ms in the transaction, 850 ms to the new frame). Build 173 adds the direct single-request mode described in [architecture.md](architecture.md).
+
+Checks in the unsent MAX draft on the MacBook display, after moving the caret with a plain Right arrow so the typed word was unknown:
+
+- Direct transaction 30–88 ms after admission (full route 600–660 ms). 60 Hz composer recordings: the new word appeared 304 and 341 ms after the second Shift release, with no selection frame; 464 ms before the snapshot started early; 323 ms without a snapshot, but then the selection was visible for about 130 ms.
+- Caret after a typed space: the word before it converted, the space stayed, and the next typed letter appeared after the space.
+- Direct conversion followed by another gesture used the retyping path (114 ms) and restored the word.
+- Digits only (`123`): no response was published, the selection was collapsed, the text and end caret were unchanged.
+- The draft was returned to the user's own text; no messages were sent.
+
+## Freshly typed MAX word — builds 165–168 (unchanged in 173)
 
 Build 168: the user's hardware-keyboard check on build 167 used the slower Services route, so the typed word was not known. Build 168 translates a key with the current layout when its event carries no text, and records a text-free `TypedWordStateReport` (candidate kind, last reset reason, key counts) for each MAX gesture. The cause is not yet confirmed from that report.
 

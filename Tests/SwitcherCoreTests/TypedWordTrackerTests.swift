@@ -99,4 +99,11 @@ final class TypedWordTrackerTests: XCTestCase {
         XCTAssertFalse(TypedWordTracker.deletesAsOneWord("ghbdtn", boundedStart: false))
         XCTAssertFalse(TypedWordTracker.deletesAsOneWord("j,thtv", boundedStart: true))
     }
+    func testAssumedEditorTextReplacesTheRun() {
+        var tracker = typing("xyz")
+        tracker.assume("ghbdtn ")
+        XCTAssertEqual(tracker.candidate, .afterSpace)
+        tracker.assume("привет")
+        XCTAssertEqual(tracker.candidate, .word("привет", boundedStart: false))
+    }
 }

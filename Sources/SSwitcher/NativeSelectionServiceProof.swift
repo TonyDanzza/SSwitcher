@@ -72,10 +72,15 @@ final class NativeSelectionServiceProof {
         automatic != nil || (grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false)
     }
 
-    func convertAtCursor(valid: @escaping () -> Bool,
+    /// Text the last submitted direct word conversion produced, for the
+    /// caller's typed-word memory. Cleared by the next request.
+    private(set) var lastDirectConversion: String?
+
+    func convertAtCursor(valid: @escaping () -> Bool, knownNoSelection: Bool = false,
                          completion: @escaping (NativeServiceDispatchState.Outcome, TISInputSource?) -> Void) {
         guard Thread.isMainThread, automatic == nil else { completion(.cancelled, nil); return }
-        cancel()
+        lastDirectConversion = nil
+        cancel(keepingEarlyShield: true)
         let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.nativeWordDeadline)
         let capture = captureWindow(armDeadline: deadline)
         guard valid(), let identity = capture.identity else { completion(.cancelled, nil); return }
@@ -88,10 +93,10 @@ final class NativeSelectionServiceProof {
         // Our static Services are registered at launch. Their actual callbacks
         // prove current capability; scanning cached menu leaves adds IPC but
         // no editor authority. Missing callbacks still fail at the deadline.
-        startWord(request, deadline: deadline, epoch: epoch)
+        startWord(request, direct: knownNoSelection, deadline: deadline, epoch: epoch)
     }
 
-    private func startWord(_ request: Automatic, deadline: ReadinessDeadline, epoch: Int) {
+    private func startWord(_ request: Automatic, direct: Bool, deadline: ReadinessDeadline, epoch: Int) {
         let identity = request.identity
         func localReady() -> Bool {
             generation == epoch && automatic === request && request.valid() &&
@@ -99,7 +104,7 @@ final class NativeSelectionServiceProof {
                 ordinarySourceID() == identity.sourceID && !IsSecureEventInputEnabled()
         }
         guard localReady() else { finishAutomatic(.cancelled); return }
-        let word = NativeWordServiceCoordinator(pid: identity.pid, window: identity.window,
+        let word = NativeWordServiceCoordinator(pid: identity.pid, window: identity.window, direct: direct,
             valid: { [weak self, weak request] in
                 guard let self, let request else { return false }
                 return self.generation == epoch && self.automatic === request && request.valid() &&
@@ -146,6 +151,21 @@ final class NativeSelectionServiceProof {
 
     func cancelVisualShield() { visualShield.cancel() }
 
+    /// Called right after the second Shift release when a direct MAX word
+    /// request is expected. Only presentation; it grants nothing.
+    func prepareEarlyShield(valid: @escaping () -> Bool) {
+        guard Thread.isMainThread, automatic == nil else { return }
+        let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.nativeVisualEarlyClaim)
+        guard let identity = captureWindow(armDeadline: deadline).identity else { return }
+        menuWorker.async { [weak self] in
+            let bounds = NativeServiceMenuResolver.windowBounds(identity.window, pid: identity.pid)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.automatic == nil || self.automatic?.identity.pid == identity.pid, valid() else { return }
+                self.visualShield.prepareEarly(bounds: bounds, valid: valid)
+            }
+        }
+    }
+
     func cancelAutomatic() {
         guard Thread.isMainThread else { return }
         guard let automatic else {
@@ -159,6 +179,7 @@ final class NativeSelectionServiceProof {
         guard let request = automatic else { return }
         let outcome = outcome == .submitted && (!request.valid() || !foregroundMatches(request.identity) ||
             ordinarySourceID() != request.identity.sourceID || IsSecureEventInputEnabled()) ? .unverified : outcome
+        if outcome == .submitted { lastDirectConversion = request.word?.convertedText }
         request.word?.cancel()
         automatic = nil
         grant = nil
@@ -220,10 +241,10 @@ final class NativeSelectionServiceProof {
         completion?(nil, "cancelled")
     }
 
-    func cancel() {
+    func cancel(keepingEarlyShield: Bool = false) {
         guard Thread.isMainThread else { return }
         cancelAutomatic()
-        visualShield.cancel()
+        if !keepingEarlyShield { visualShield.cancel() }
         let wasArmed = grant != nil || waitingDeadline != nil
         if grant?.keyboardProbeStarted == true && grant?.keyboardProbeFinished == false { KeyboardEvents.cancelDelivery() }
         let completion = readbackCompletion

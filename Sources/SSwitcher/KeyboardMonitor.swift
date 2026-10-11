@@ -33,8 +33,21 @@ final class KeyboardMonitor {
     /// (MAX) is frontmost; switching it off forgets them immediately.
     var tracksTypedWord = false { didSet { forgetTypedWord("activation") } }
     var typedWordCandidate: TypedWordTracker.Candidate { tracksTypedWord ? typedWord.candidate : .unknown }
+    /// MAX only: true when no editor selection can exist, because the last
+    /// caret change was typing, Backspace, a plain arrow or a plain single
+    /// click. Drags, multi-clicks, Shift navigation, shortcuts, other control
+    /// keys and app changes make a selection possible.
+    private(set) var selectionKnownEmpty = false
     func replaceTypedWord(_ word: String, with replacement: String) { typedWord.replaceWord(word, with: replacement) }
+    /// After a native conversion the editor's own text ends at the caret.
+    func assumeTypedWord(_ text: String) {
+        forgetTypedWord("nativeConversion")
+        typedWord.assume(text)
+        selectionKnownEmpty = true
+    }
+    func assumeSelectionEmpty() { selectionKnownEmpty = true }
     func forgetTypedWord(_ reason: String = "replacement") {
+        if reason != "nativeConversion" && reason != "click" { selectionKnownEmpty = false }
         typedWord.reset()
         typedWordReset = reason; typedKeysSinceReset = 0; translatedKeysSinceReset = 0
     }
@@ -152,7 +165,12 @@ final class KeyboardMonitor {
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         switch type {
         case .keyDown: recordTyping(event, key: key)
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown: if tracksTypedWord { forgetTypedWord("click") }
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            guard tracksTypedWord else { break }
+            forgetTypedWord("click")
+            selectionKnownEmpty = type == .leftMouseDown && event.getIntegerValueField(.mouseEventClickState) == 1 &&
+                event.flags.intersection([.maskShift, .maskCommand, .maskControl, .maskAlternate]).isEmpty
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: selectionKnownEmpty = false
         default: break
         }
         let interaction: WindowShortcutInteraction
@@ -225,6 +243,7 @@ final class KeyboardMonitor {
             let before = typedWord.candidate
             typedWord.backspace()
             if before != .unknown, typedWord.candidate == .unknown { forgetTypedWord("backspaceAcrossSpace") }
+            selectionKnownEmpty = true
             return
         }
         var length = 0
@@ -238,8 +257,14 @@ final class KeyboardMonitor {
             translatedKeysSinceReset += 1
         }
         typedWord.typed(text)
-        if typedWord.candidate == .unknown { forgetTypedWord(text.isEmpty ? "noText" : "controlKey") }
-        else { typedKeysSinceReset += 1 }
+        if typedWord.candidate == .unknown {
+            forgetTypedWord(text.isEmpty ? "noText" : "controlKey")
+            // A plain arrow, Home, End or page key collapses any selection.
+            selectionKnownEmpty = [115, 116, 119, 121, 123, 124, 125, 126].contains(key) && !event.flags.contains(.maskShift)
+        } else {
+            typedKeysSinceReset += 1
+            selectionKnownEmpty = true
+        }
     }
 
     private func translate(_ key: UInt16, flags: CGEventFlags) -> String? {

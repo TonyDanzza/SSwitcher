@@ -11,8 +11,36 @@ final class NativeWordVisualShield {
     private var removal: DispatchWorkItem?
     private var preparationCompletion: (() -> Void)?
     private var started = 0.0
+    private var earlyBounds: CGRect?
+    private var earlyExpiry: DispatchWorkItem?
+
+    /// Starts the snapshot at the gesture release, overlapping the Shift
+    /// quiet interval. A matching `prepare` claims it; otherwise it closes
+    /// itself shortly, so a gesture that never converts leaves no cover.
+    func prepareEarly(bounds: CGRect?, valid: @escaping () -> Bool) {
+        guard let bounds else { return }
+        prepare(bounds: bounds, valid: valid) {}
+        guard preparationCompletion != nil || image != nil else { return }
+        earlyBounds = bounds
+        let epoch = generation
+        let expiry = DispatchWorkItem { [weak self] in
+            guard let self, self.generation == epoch, self.earlyBounds != nil else { return }
+            self.cancel()
+        }
+        earlyExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeVisualEarlyClaim, execute: expiry)
+    }
 
     func prepare(bounds: CGRect?, valid: @escaping () -> Bool, completion: @escaping () -> Void) {
+        if let early = earlyBounds, let bounds, early == bounds.integral || early == bounds {
+            // Claim the snapshot already prepared for this window.
+            earlyBounds = nil
+            earlyExpiry?.cancel(); earlyExpiry = nil
+            if let pending = preparationCompletion {
+                preparationCompletion = { pending(); completion() }
+            } else { completion() }
+            return
+        }
         cancel()
         let epoch = generation
         preparationCompletion = completion
@@ -64,6 +92,8 @@ final class NativeWordVisualShield {
     func cancel() {
         dispatchPrecondition(condition: .onQueue(.main))
         generation += 1
+        earlyBounds = nil
+        earlyExpiry?.cancel(); earlyExpiry = nil
         let completion = preparationCompletion
         preparationCompletion = nil
         removal?.cancel(); removal = nil

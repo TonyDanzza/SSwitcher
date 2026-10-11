@@ -32,6 +32,12 @@ A double Shift with a known candidate converts it without selection, Services, A
 
 The word is what the user typed, not a proven document state: after a click it may continue an existing word, and only the typed part is replaced. An editor that rewrites text without a key event (autocompletion) can make the run stale. Delivery receipts do not prove MAX handled the events.
 
+## MAX direct word request
+
+The monitor also tracks whether a MAX selection can exist. Typing, Backspace, plain navigation keys and a plain single click leave none; drags, multi-clicks, modified clicks, Shift navigation, shortcuts, other control keys and activation make one possible. When none can exist and the typed word is unknown (or the caret follows a typed space, where autocorrection may have changed the word), `NativeWordServiceCoordinator` runs in direct mode: one window-bound batch of Option+Shift+Left and the conversion service. The packet is the word before the caret plus any whitespace the caret followed; the whitespace is returned unchanged, so the caret stays in place. This skips the selection and boundary probes and both 250 ms requestor-return settles. A caret inside a word converts the part to its left. If the callback arrives but no response is published, the selection is collapsed with Right after the return settle. The converted text seeds the typed-word tracker, so the next gesture uses the retyping path.
+
+The visual shield for this request starts at the second Shift release, during the burst quiet interval; an unclaimed snapshot closes after 0.4 s. A recording without the shield showed the selection for about 130 ms, so the shield stays.
+
 ## MAX Services transaction
 
 MAX does not expose its composer as a usable Accessibility text editor in the tested version. The app uses the system Services protocol with a dedicated packet:
