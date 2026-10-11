@@ -25,4 +25,24 @@ final class AccessibilityEditorPolicyTests: XCTestCase {
         }
         XCTAssertTrue(AccessibilityEditorPolicy.permitsEditing(isFigma: false, role: "AXTextArea", description: nil))
     }
+
+    func testCanvasFocusPreparationOnlyForContainerFocusWithoutText() {
+        // Measured in Pages 15.4: focus AXScrollArea > AXSplitGroup > AXWindow > AXApplication.
+        XCTAssertTrue(AccessibilityEditorPolicy.needsCanvasFocusPreparation(focusRole: "AXScrollArea", textRangeFound: false))
+        XCTAssertTrue(AccessibilityEditorPolicy.needsCanvasFocusPreparation(focusRole: "AXLayoutArea", textRangeFound: false))
+        XCTAssertFalse(AccessibilityEditorPolicy.needsCanvasFocusPreparation(focusRole: "AXScrollArea", textRangeFound: true))
+        for role in [nil, "AXButton", "AXWindow", "AXApplication", "AXGroup", "AXTextArea", "AXWebArea"] {
+            XCTAssertFalse(AccessibilityEditorPolicy.needsCanvasFocusPreparation(focusRole: role, textRangeFound: false))
+        }
+    }
+
+    func testOnlyFocusedTextElementsWithRangeAreCanvasCandidates() {
+        XCTAssertTrue(AccessibilityEditorPolicy.isFocusedTextCandidate(role: "AXTextArea", focused: true, hasRange: true))
+        XCTAssertTrue(AccessibilityEditorPolicy.isFocusedTextCandidate(role: "AXTextField", focused: true, hasRange: true))
+        XCTAssertFalse(AccessibilityEditorPolicy.isFocusedTextCandidate(role: "AXTextArea", focused: false, hasRange: true))
+        XCTAssertFalse(AccessibilityEditorPolicy.isFocusedTextCandidate(role: "AXTextArea", focused: true, hasRange: false))
+        for role in [nil, "AXStaticText", "AXScrollArea", "AXComboBox"] {
+            XCTAssertFalse(AccessibilityEditorPolicy.isFocusedTextCandidate(role: role, focused: true, hasRange: true))
+        }
+    }
 }

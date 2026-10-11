@@ -213,6 +213,51 @@ final class AXClient {
         return diagnostic
     }
 
+    /// Pages builds the text elements of its document canvas only for an
+    /// assistive client and until then reports the canvas scroll area as
+    /// focused. A request to enable AXEnhancedUserInterface wakes it (Pages
+    /// answers "not implemented" but builds the elements and moves its focus to
+    /// the text). Ask once, wait briefly for the application's own focus to
+    /// become a focused text element, and turn the flag off again if the
+    /// application actually kept it. The flag is never touched when it was on.
+    private func prepareCanvasFocus(_ application: EditorApplication, app: AXUIElement,
+                                    cancellation: AttemptCancellation,
+                                    diagnostic: inout AXFocusPreparationDiagnostic) -> AXUIElement? {
+        guard execution.policy == .remoteApplication else { return nil }
+        let expires = ProcessInfo.processInfo.systemUptime + ConversionTiming.canvasFocusPreparationBudget
+        func ready() -> Bool {
+            if cancellation.isCancelled { diagnostic.stage = "cancelled"; return false }
+            if ProcessInfo.processInfo.systemUptime >= expires { diagnostic.stage = "timedOut"; return false }
+            return true
+        }
+        let flag = "AXEnhancedUserInterface" as CFString
+        func enhanced() -> Bool {
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(app, flag, &value) == .success && (value as? Bool) == true
+        }
+        let wasEnhanced = enhanced()
+        if !wasEnhanced {
+            diagnostic.stage = "canvasWakeRequested"
+            let reply = AXUIElementSetAttributeValue(app, flag, kCFBooleanTrue)
+            if reply != .success { diagnostic.error = reply }
+        }
+        defer { if !wasEnhanced, enhanced() { _ = AXUIElementSetAttributeValue(app, flag, kCFBooleanFalse) } }
+        while ready() {
+            if let focus = focusedElement(app).element {
+                var pid: pid_t = 0
+                let role = attribute(focus, kAXRoleAttribute) as? String
+                if AXUIElementGetPid(focus, &pid) == .success, pid == application.pid,
+                   AccessibilityEditorPolicy.isFocusedTextCandidate(role: role, focused: attribute(focus, kAXFocusedAttribute) as? Bool == true,
+                                                                    hasRange: attribute(focus, kAXSelectedTextRangeAttribute) != nil) {
+                    diagnostic.stage = "canvasPrepared"
+                    return focus
+                }
+            }
+            Thread.sleep(forTimeInterval: ConversionTiming.pollInterval)
+        }
+        return nil
+    }
+
     /// Qt activates its accessibility machinery at QNSView entry points.
     /// Enter the app's public hit-test path within its focused window, discard
     /// the reply, then accept only fresh app/global focus in that same window.
@@ -389,6 +434,13 @@ final class AXClient {
         let initialFocusRoles = discovery.roles
         var focusPreparation = AXFocusPreparationDiagnostic()
         var qtFocusedWindow: AXQtFocusedWindow?
+        if spotlight == nil, focused != nil, discovery.snapshot?.isSecure != true, !cancellation.isCancelled,
+           AccessibilityEditorPolicy.needsCanvasFocusPreparation(focusRole: initialFocusRoles.first ?? nil,
+                                                                 textRangeFound: discovery.snapshot?.range != nil),
+           let prepared = prepareCanvasFocus(application, app: app, cancellation: cancellation, diagnostic: &focusPreparation) {
+            focused = prepared
+            discovery = discover(focused)
+        }
         if application.isQtQuick, !application.isElectron, spotlight == nil,
            discovery.snapshot?.role == kAXApplicationRole,
            discovery.snapshot?.range == nil, discovery.snapshot?.value == nil,

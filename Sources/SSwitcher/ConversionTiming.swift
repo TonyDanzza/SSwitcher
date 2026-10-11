@@ -15,6 +15,7 @@ enum ConversionTiming {
     static let overlayFocusBudget = 0.12
     static let qtFocusPreparationBudget = 0.6
     static let qtFocusProofBudget = 0.36
+    static let canvasFocusPreparationBudget = 0.4
     static let replacementDeadline = 0.5
     static let pollInterval = 0.02
     static let textPairInterval = 0.008
