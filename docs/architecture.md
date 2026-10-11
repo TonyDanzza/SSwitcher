@@ -23,7 +23,7 @@ The app uses AppKit. External Accessibility reads are serialized off the main th
 
 Word replacement is allowed only when the cursor is immediately after the last character. Unicode coordinates are UTF-16; deletion requires a bounded, safe character plan. Unsupported composition, embedded objects in the replaced fragment, protected input or inconsistent replies cause refusal.
 
-Electron Accessibility preparation is bounded and cached; enabling it does not itself prove a usable editor. Spotlight has a narrowly verified search-field scope because the foreground application can remain Finder while the search field owns input.
+Electron Accessibility preparation is bounded and cached; enabling it does not itself prove a usable editor. Pages reports its document scroll area as focused until an assistive client requests `AXEnhancedUserInterface`; when the focus is such a container with no text range, the client requests it once (Pages answers "not implemented" but builds its text elements), waits up to 0.4 s for the application's own focus to become a focused text element with a range, and turns the flag off again only if the application kept it. Spotlight has a narrowly verified search-field scope because the foreground application can remain Finder while the search field owns input.
 
 ## MAX freshly typed word
 

@@ -1,4 +1,13 @@
-# Validation — 0.1.23 / build 175
+# Validation — 0.1.23 / build 177
+
+## Pages — build 177
+
+The user reported that double Shift did nothing in Pages. Reports showed `editingGuard` with the focus chain AXScrollArea → AXSplitGroup → AXWindow → AXApplication. In a freshly launched Pages 15.4 the application focus stayed on the scroll area and its window had no text element; reading `AXContents`, hit-testing the canvas and walking all 83 window elements changed nothing. One request to set `AXEnhancedUserInterface` (answered with -25208) made the body `AXTextArea` ("Основной текст") appear and take the focus, with a range, settable value and `AXStringForRange`.
+
+Build 177 in a freshly launched Pages, own new document: the first gesture after typing a word reported `canvasPrepared` and `converted`. An earlier check in an already woken Pages converted a word at the end and converted it back. Not checked: selections, tables, text boxes, headers and footers, Keynote and Numbers (not installed).
+
+During the cold check the user was typing in another window; while the test brought Pages forward some of those keystrokes reached the test document, so its final word is not a clean fixture. The gesture itself was reported as `converted` by the editor check. `swift test`: **240 tests, zero failures**.
+
 
 ## Window transfer — build 175
 
