@@ -94,8 +94,7 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
 
     @objc private func allowCapture() { requestCapture() }
     @objc private func copyDiagnostics() {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        let report = "SSwitcher \(version)\nmacOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" + readStatus()
+        let report = "SSwitcher \(DiagnosticReports.version)\nmacOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" + readStatus()
         NSPasteboard.general.clearContents()
         if !NSPasteboard.general.setString(report, forType: .string) { NSSound.beep() }
     }

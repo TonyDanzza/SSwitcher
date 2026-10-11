@@ -90,7 +90,7 @@ final class ConversionCoordinator {
                                         modifiersClear: modifiersClear, observedModifiersClear: observedModifiersClear,
                                         completion: completion)
         self.attempt = attempt
-        UserDefaults.standard.removeObject(forKey: "LastEditingRefusalDiagnostic")
+        DiagnosticReports.shared.remove("LastEditingRefusalDiagnostic")
         diagnosticDetails = "Проверка редактора"
         read(attempt, operation: { $0.target(fallbackPID: frontmost.processIdentifier) }) { [weak self] target in
             guard let self else { return }
@@ -495,9 +495,7 @@ final class ConversionCoordinator {
                 report["targetHasLineBreaks"] = scope.text.contains("\n") || scope.text.contains("\u{2028}")
             }
             report["timestamp"] = Date().timeIntervalSince1970
-            report["version"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-            report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-            UserDefaults.standard.set(report, forKey: "LastEditingRefusalDiagnostic")
+            DiagnosticReports.shared.record("LastEditingRefusalDiagnostic", report, includeVersion: true)
         }
         attempt.trace.finish(confirmed: confirmed)
         self.attempt = nil

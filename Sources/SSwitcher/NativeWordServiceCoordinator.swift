@@ -178,9 +178,7 @@ final class NativeWordServiceCoordinator {
         let conversion = InputSources.Conversion(text: converted.text + exact.trailing, target: converted.target)
         plan = exact
         if direct { convertedText = conversion.text }
-        UserDefaults.standard.set(["selectedGraphemes": text.count, "singleNativeCall": true,
-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-            forKey: "NativeWordScopeReport")
+        DiagnosticReports.shared.record("NativeWordScopeReport", ["selectedGraphemes": text.count, "singleNativeCall": true])
         return conversion
     }
 
@@ -374,10 +372,9 @@ final class NativeWordServiceCoordinator {
 
     private func record(_ stage: String, reason: String? = nil) {
         var report: [String: Any] = ["stage": stage, "phase": phase,
-            "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""]
+            "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - started) * 1000)]
         if let wordIssuedAt { report["wordCommitMS"] = Int((ProcessInfo.processInfo.systemUptime - wordIssuedAt) * 1000) }
         if let reason { report["reason"] = reason }
-        UserDefaults.standard.set(report, forKey: "NativeWordServiceReport")
+        DiagnosticReports.shared.record("NativeWordServiceReport", report)
     }
 }

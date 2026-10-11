@@ -112,9 +112,8 @@ final class NativeWordVisualShield {
 
     private func record(_ stage: String, reason: String? = nil) {
         var report: [String: Any] = ["stage": stage,
-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
             "elapsedMS": Int(max(0, ProcessInfo.processInfo.systemUptime - started) * 1000)]
         if let reason { report["reason"] = reason }
-        UserDefaults.standard.set(report, forKey: "NativeWordVisualReport")
+        DiagnosticReports.shared.record("NativeWordVisualReport", report)
     }
 }

@@ -207,14 +207,12 @@ final class NativeSelectionServiceProof {
     /// calls or returned data: the requestor retains its current selection.
     func receiveWordPacket(_ packet: NSPasteboard) -> Bool {
         guard Thread.isMainThread, let request = automatic, let word = request.word else { return false }
-        UserDefaults.standard.set(["stage": "callbackReceived",
+        DiagnosticReports.shared.record("NativeWordPacketReport", ["stage": "callbackReceived",
             "foregroundMAX": foregroundMatches(request.identity),
             "foregroundOwn": NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
             "providerActive": NSApp.isActive, "inputUnchanged": request.valid(),
             "hostActive": NSRunningApplication(processIdentifier: request.identity.pid)?.isActive == true,
-            "menuOwnerMAX": NSWorkspace.shared.menuBarOwningApplication?.processIdentifier == request.identity.pid,
-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-            forKey: "NativeWordPacketReport")
+            "menuOwnerMAX": NSWorkspace.shared.menuBarOwningApplication?.processIdentifier == request.identity.pid])
         guard request.valid(), foregroundMatches(request.identity), ordinarySourceID() == request.identity.sourceID,
               !IsSecureEventInputEnabled(), ![NSPasteboard.Name.general, .find, .font, .ruler, .drag].contains(packet.name),
               packet.availableType(from: [.string]) == .string, let text = packet.string(forType: .string) else { return true }
@@ -253,8 +251,7 @@ final class NativeSelectionServiceProof {
             // Preserve the callback refusal separately, without retaining text.
             var callbackReport = report
             callbackReport["stage"] = stage
-            callbackReport["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-            UserDefaults.standard.set(callbackReport, forKey: "NativeSelectionCallbackReport")
+            DiagnosticReports.shared.record("NativeSelectionCallbackReport", callbackReport)
             finish(stage, report: report)
             if let automatic {
                 automatic.state.published(stage == "responsePublished")
@@ -373,10 +370,7 @@ final class NativeSelectionServiceProof {
     }
 
     private func record(_ report: [String: Any]) {
-        var report = report
-        report["version"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        report["build"] = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        UserDefaults.standard.set(report, forKey: "NativeSelectionServiceReport")
+        DiagnosticReports.shared.record("NativeSelectionServiceReport", report, includeVersion: true)
     }
 
     private func expire(after delay: Double, epoch: Int) {

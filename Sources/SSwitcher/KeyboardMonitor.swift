@@ -86,9 +86,8 @@ final class KeyboardMonitor {
     func triggerForDiagnostics() {
         let allowed = canStartConversion?() != false
         let clear = physicalModifiersClear
-        UserDefaults.standard.set(["build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
-            "allowed": allowed, "physicalClear": clear, "observedClear": observedModifiersClear,
-            "heldModifiers": hardwareModifierKeysDown.sorted()], forKey: "DiagnosticTriggerReport")
+        DiagnosticReports.shared.record("DiagnosticTriggerReport", ["allowed": allowed, "physicalClear": clear,
+            "observedClear": observedModifiersClear, "heldModifiers": hardwareModifierKeysDown.sorted()])
         guard allowed, clear else { return }
         lastGestureRelease = ProcessInfo.processInfo.systemUptime
         burst.shiftChanged(down: false, at: lastGestureRelease)

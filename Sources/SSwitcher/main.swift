@@ -117,11 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let candidate = self.monitor.typedWordCandidate
                 let kind: String
                 switch candidate { case .unknown: kind = "unknown"; case .afterSpace: kind = "afterSpace"; case .word: kind = "word" }
-                UserDefaults.standard.set(["candidate": kind, "tracking": self.monitor.tracksTypedWord,
+                DiagnosticReports.shared.record("TypedWordStateReport", ["candidate": kind, "tracking": self.monitor.tracksTypedWord,
                     "lastReset": self.monitor.typedWordReset, "keysSinceReset": self.monitor.typedKeysSinceReset,
-                    "translatedKeys": self.monitor.translatedKeysSinceReset, "timestamp": Date().timeIntervalSince1970,
-                    "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-                    forKey: "TypedWordStateReport")
+                    "translatedKeys": self.monitor.translatedKeysSinceReset, "timestamp": Date().timeIntervalSince1970])
                 if case .word(let word, let boundedStart) = candidate,
                    self.retypeMaxWord(word, boundedStart: boundedStart, pid: max.processIdentifier, generation: generation) { return }
                 // A typed word after a space may have been autocorrected, so
@@ -140,10 +138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     guard let self else { return }
                     self.refreshWindowShortcuts()
                     self.monitor.conversionFinished(unverified: outcome == .unverified)
-                    UserDefaults.standard.set(["direct": direct, "outcome": String(describing: outcome),
-                        "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
-                        "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-                        forKey: "MaxServiceRouteReport")
+                    DiagnosticReports.shared.record("MaxServiceRouteReport", ["direct": direct, "outcome": String(describing: outcome),
+                        "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - started) * 1000)])
                     switch outcome {
                     case .submitted:
                         if let target { InputSources.selectAfterConversion(target) }
@@ -190,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.refreshTypedWordTracking(frontmost: app)
             if InputMethodIdentity.currentMode == nil, let app { self.editor.prepareAccessibility(for: app) }
         }
+        DiagnosticReports.shared.removeObsoleteReports()
         refreshTypedWordTracking()
         if InputMethodIdentity.currentMode == nil, let app = NSWorkspace.shared.frontmostApplication { editor.prepareAccessibility(for: app) }
         refreshPermissions()
@@ -248,9 +245,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.monitor.forgetTypedWord("interrupted")
                 self.lastResult = "Замена в MAX прервана вводом; проверьте текст"
             }
-            UserDefaults.standard.set(["delivered": delivered, "oneWordDeletion": asOneWord, "characters": count,
-                "elapsedMS": elapsed, "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
-                forKey: "TypedWordReplacementReport")
+            DiagnosticReports.shared.record("TypedWordReplacementReport", ["delivered": delivered, "oneWordDeletion": asOneWord,
+                "characters": count, "elapsedMS": elapsed])
             self.monitor.conversionFinished(unverified: !delivered)
             self.statusItem.button?.toolTip = self.lastResult
         }
@@ -302,7 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         guard let menu = statusItem.menu else { return }
         menu.removeAllItems()
-        add("SSwitcher \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")", to: menu)
+        add("SSwitcher \(DiagnosticReports.version)", to: menu)
         add("Раскладка: \(InputSources.currentName)", to: menu)
         add(enabled ? (monitor.isRunning && AXIsProcessTrusted() ? "Двойной Shift включён" : "Нужны разрешения macOS") : "На паузе", to: menu)
         menu.addItem(.separator())
@@ -460,6 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let inputSourceObserver { DistributedNotificationCenter.default().removeObserver(inputSourceObserver) }
         monitor.stop()
         editor.shutdown()
+        DiagnosticReports.shared.flushNow()
     }
 }
 
