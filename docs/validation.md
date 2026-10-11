@@ -1,4 +1,16 @@
-# Validation — 0.1.23 / build 173
+# Validation — 0.1.23 / build 174
+
+## Refactoring — build 174
+
+Build 174 removes the explicitly armed MAX diagnostics (about 1,700 lines and four buttons in the diagnostics window), moves MAX routing into `MaxConversionRouter`, collects reports in memory, and trims per-event work in the keyboard tap. The conversion routes are meant to be unchanged.
+
+On 11 October 2026, `swift test` ran **231 tests with zero failures**. The signed release build was installed and its signature checked. Checks on the MacBook display:
+
+- TextEdit, own new document: word at the end (`ghbdtn` → `Привет`; TextEdit capitalized the sentence start itself), reverse conversion, a selected word, then typing `!` after the conversion. All reports said `converted`.
+- MAX test chat draft, own suffix only: a freshly typed word was retyped with Option+Backspace (107 ms); after a plain Right arrow the direct Services request converted it back (41 ms transaction, snapshot removed after 227 ms); after Shift+Left/Shift+Right the full Services route converted it (582 ms transaction); a selected word was converted as a selection. The caret stayed at the end with no selection. The draft was returned to its previous text; no messages were sent.
+
+These are single checks, not percentiles.
+
 
 ## Already written MAX word — builds 169–173
 

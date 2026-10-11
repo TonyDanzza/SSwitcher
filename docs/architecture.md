@@ -72,7 +72,9 @@ The original focused window, owner and display snapshot are revalidated before e
 
 ## Idle work, measurement and privacy
 
-There is no permanent polling of editor text. Layout maps and bounded Accessibility preparation results are cached. Permission polling stops after access is granted; diagnostics refresh only while visible.
+There is no permanent polling of editor text. Layout maps, bounded Accessibility preparation results and each running application's package description are cached. Permission polling stops after access is granted; diagnostics refresh only while visible. The status menu is rebuilt when it opens, not on layout or display changes. The keyboard tap queues work only when an overlay or attempt cache exists to clear.
+
+Text-free diagnostic reports (`defaults read com.tonydanzza.SSwitcher`) are collected by `DiagnosticReports` in memory and written together at most once per second and on quit, never inside a Services callback.
 
 Performance summaries retain a bounded number of numeric samples. Median and p95 require at least 20 acknowledged attempts in the same editor/mode. Document acknowledgement does not measure compositor completion. Text, clipboard contents and pixels are excluded from reports; optional snapshots exist only in memory. The explicit diagnostics-copy button may copy the displayed report to the general clipboard.
 
