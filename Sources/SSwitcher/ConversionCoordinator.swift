@@ -23,6 +23,9 @@ final class ConversionCoordinator {
     let performance = PerformanceRecorder()
     private var attempt: ConversionAttempt?
     private var unconfirmedInput: (() -> Bool)?
+    /// Geometry and document-extent caches are filled only by attempts, so
+    /// input after an idle period has nothing to invalidate.
+    private var attemptCachesFilled = false
     private(set) var diagnosticDetails = ""
     var isConverting: Bool { attempt != nil }
 
@@ -34,8 +37,11 @@ final class ConversionCoordinator {
     func userInputChanged() {
         dispatchPrecondition(condition: .onQueue(.main))
         unconfirmedInput = nil
-        ax.invalidateGeometry()
-        localAX.invalidateGeometry()
+        if attemptCachesFilled {
+            attemptCachesFilled = false
+            ax.invalidateGeometry()
+            localAX.invalidateGeometry()
+        }
         cancel()
     }
 
@@ -90,6 +96,7 @@ final class ConversionCoordinator {
                                         modifiersClear: modifiersClear, observedModifiersClear: observedModifiersClear,
                                         completion: completion)
         self.attempt = attempt
+        attemptCachesFilled = true
         DiagnosticReports.shared.remove("LastEditingRefusalDiagnostic")
         diagnosticDetails = "Проверка редактора"
         read(attempt, operation: { $0.target(fallbackPID: frontmost.processIdentifier) }) { [weak self] target in

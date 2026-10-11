@@ -17,6 +17,8 @@ final class ReplacementOverlay {
     private(set) var lastStatus = "Ожидание замены"
     private var pending: CaptureRequest?
     private var active: ImageOverlay?
+    /// No capture is pending and no snapshot is on screen.
+    var isIdle: Bool { pending == nil && active == nil }
     var canCapture: Bool {
         canCapture(requiredMask: false)
     }

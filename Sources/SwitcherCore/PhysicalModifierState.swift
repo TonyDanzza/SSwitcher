@@ -6,7 +6,7 @@ public struct PhysicalModifierState {
     public init() {}
     public var observedModifiersClear: Bool { held.isEmpty }
     public var shiftHeld: Bool { held.contains(56) || held.contains(60) }
-    public var otherModifierHeld: Bool { !held.subtracting([56, 60]).isEmpty }
+    public var otherModifierHeld: Bool { held.contains { $0 != 56 && $0 != 60 } }
     public mutating func reset() { held.removeAll() }
     public mutating func changed(key: UInt16, groupDown: Bool) {
         guard Self.unsafeKeys.contains(key) else { return }

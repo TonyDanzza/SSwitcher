@@ -71,7 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.rebuildMenu()
         }
         monitor.onUserActivity = { [weak self] in
-            self?.editor.overlay.cancel()
+            guard let overlay = self?.editor.overlay, !overlay.isIdle else { return }
+            DispatchQueue.main.async { overlay.cancel() }
             // Bare Shift taps are drained by the active MAX transaction. They
             // must not expose its intermediate selection. Typing, clicks,
             // scrolling and other modifiers cancel via onRealInput below.

@@ -166,7 +166,7 @@ public enum WindowShortcutInteraction {
             if (key == 58 || key == 61) && !option { return false }
             return true
         case .keyDown:
-            return !([UInt16(123), 124, 125, 126].contains(key) && option && shift && !command && !control)
+            return !((123...126).contains(key) && option && shift && !command && !control)
         }
     }
 }

@@ -4,6 +4,8 @@ import SwitcherCore
 
 final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
+    /// Called inside the listening tap for every non-key-up event; keep it to
+    /// a cheap check and dispatch AppKit work.
     var onUserActivity: (() -> Void)?
     var onRealInput: (() -> Void)?
     var onWindowInteraction: (() -> Void)?
@@ -57,8 +59,9 @@ final class KeyboardMonitor {
     private var source: CFRunLoopSource?
     var isRunning: Bool { tap != nil }
     private var hardwareModifierKeysDown: Set<UInt16> {
-        Set(PhysicalModifierState.unsafeKeys.filter { CGEventSource.keyState(.hidSystemState, key: CGKeyCode($0)) })
+        Set(PhysicalModifierState.unsafeKeys.filter(Self.hardwareKeyDown))
     }
+    private static func hardwareKeyDown(_ key: UInt16) -> Bool { CGEventSource.keyState(.hidSystemState, key: CGKeyCode(key)) }
     var physicalModifiersClear: Bool {
         modifiers.permitsMutation(hardwareKeysDown: hardwareModifierKeysDown)
     }
@@ -187,9 +190,9 @@ final class KeyboardMonitor {
         // is needed only for our delivery receipt, not a second input change.
         if type == .keyUp { return }
         activityGeneration &+= 1
-        // The listening tap does only local bookkeeping/invalidation. AppKit
-        // work is dispatched after the callback has returned to its run loop.
-        DispatchQueue.main.async { [weak self] in self?.onUserActivity?() }
+        // The listening tap does only local bookkeeping/invalidation; the
+        // callback dispatches AppKit work only when something is on screen.
+        onUserActivity?()
         // A second double Shift is drained during the existing replacement.
         // Actual typing, clicks and other modifiers still cancel that attempt.
         if type != .flagsChanged || (key != 56 && key != 60) {
@@ -201,8 +204,7 @@ final class KeyboardMonitor {
         }
         guard type == .flagsChanged else { detector.cancelGesture(); return }
         if let flag = Self.modifierFlags[key] { modifiers.changed(key: key, groupDown: event.flags.contains(flag)) }
-        let hardwareDown = hardwareModifierKeysDown
-        let shiftDown = modifiers.shiftHeld || hardwareDown.contains(56) || hardwareDown.contains(60)
+        let shiftDown = modifiers.shiftHeld || Self.hardwareKeyDown(56) || Self.hardwareKeyDown(60)
         if key == 56 || key == 60 {
             shiftEventCount += 1
             burst.shiftChanged(down: shiftDown, at: ProcessInfo.processInfo.systemUptime)
@@ -210,7 +212,8 @@ final class KeyboardMonitor {
         }
         if detector.shiftChanged(
             key: key, anyShiftDown: shiftDown,
-            otherModifierDown: modifiers.otherModifierHeld || !hardwareDown.subtracting([56, 60]).isEmpty,
+            otherModifierDown: modifiers.otherModifierHeld ||
+                PhysicalModifierState.unsafeKeys.contains { $0 != 56 && $0 != 60 && Self.hardwareKeyDown($0) },
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             doubleShiftCount += 1
@@ -245,10 +248,11 @@ final class KeyboardMonitor {
             selectionKnownEmpty = true
             return
         }
-        var length = 0
-        var units = [UniChar](repeating: 0, count: 8)
-        event.keyboardGetUnicodeString(maxStringLength: units.count, actualStringLength: &length, unicodeString: &units)
-        var text = String(utf16CodeUnits: units, count: min(max(length, 0), units.count))
+        var text = withUnsafeTemporaryAllocation(of: UniChar.self, capacity: 8) { units -> String in
+            var length = 0
+            event.keyboardGetUnicodeString(maxStringLength: units.count, actualStringLength: &length, unicodeString: units.baseAddress!)
+            return String(utf16CodeUnits: units.baseAddress!, count: min(max(length, 0), units.count))
+        }
         // Hardware key events may reach a session tap without their text;
         // translate the key with the current layout as the editor will.
         if text.isEmpty, let translated = translate(key, flags: event.flags) {
@@ -259,7 +263,10 @@ final class KeyboardMonitor {
         if typedWord.candidate == .unknown {
             forgetTypedWord(text.isEmpty ? "noText" : "controlKey")
             // A plain arrow, Home, End or page key collapses any selection.
-            selectionKnownEmpty = [115, 116, 119, 121, 123, 124, 125, 126].contains(key) && !event.flags.contains(.maskShift)
+            switch key {
+            case 115, 116, 119, 121, 123...126: selectionKnownEmpty = !event.flags.contains(.maskShift)
+            default: selectionKnownEmpty = false
+            }
         } else {
             typedKeysSinceReset += 1
             selectionKnownEmpty = true
@@ -276,13 +283,14 @@ final class KeyboardMonitor {
         var modifiers = 0
         if flags.contains(.maskShift) { modifiers |= shiftKey }
         if flags.contains(.maskAlphaShift) { modifiers |= alphaLock }
-        var deadKey: UInt32 = 0
-        var length = 0
-        var buffer = [UniChar](repeating: 0, count: 8)
-        guard UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown), UInt32(modifiers >> 8), UInt32(LMGetKbdType()),
-                             0, &deadKey, buffer.count, &length, &buffer) == noErr,
-              deadKey == 0, length > 0, length <= buffer.count else { return nil }
-        return String(utf16CodeUnits: buffer, count: length)
+        return withUnsafeTemporaryAllocation(of: UniChar.self, capacity: 8) { buffer -> String? in
+            var deadKey: UInt32 = 0
+            var length = 0
+            guard UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown), UInt32(modifiers >> 8), UInt32(LMGetKbdType()),
+                                 0, &deadKey, buffer.count, &length, buffer.baseAddress!) == noErr,
+                  deadKey == 0, length > 0, length <= buffer.count else { return nil }
+            return String(utf16CodeUnits: buffer.baseAddress!, count: length)
+        }
     }
 
     deinit { stop() }
