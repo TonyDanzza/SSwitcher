@@ -19,6 +19,10 @@ public struct WindowTransferPlan: Equatable {
     public let frame: CGRect
     public let needsResize: Bool
 
+    /// macOS's own tiles differ from exact fractions of the visible frame by
+    /// 1-2 pt (overlap rounding). Every edge must still be this close.
+    public static let tileTolerance: CGFloat = 4
+
     public static func accessibilityRect(fromAppKit rect: CGRect, primaryTop: CGFloat) -> CGRect {
         CGRect(x: rect.minX, y: primaryTop - rect.maxY, width: rect.width, height: rect.height)
     }
@@ -72,19 +76,26 @@ public struct WindowTransferPlan: Equatable {
         }
         guard let destination = candidates.first?.0 else { return .noNeighbor }
         let oldWork = source.visibleFrame, newWork = destination.visibleFrame
+        // AppKit floors fractional window origins, which made repeated moves
+        // creep. Request whole points: tiles round each edge so neighbours
+        // stay adjacent; other windows keep their exact size.
         let result: CGRect
         if let fraction = tiledFraction(window: window, work: oldWork) {
-            result = CGRect(x: newWork.minX + fraction.minX * newWork.width, y: newWork.minY + fraction.minY * newWork.height,
-                            width: fraction.width * newWork.width, height: fraction.height * newWork.height)
+            let minX = (newWork.minX + fraction.minX * newWork.width).rounded()
+            let minY = (newWork.minY + fraction.minY * newWork.height).rounded()
+            let maxX = (newWork.minX + fraction.maxX * newWork.width).rounded()
+            let maxY = (newWork.minY + fraction.maxY * newWork.height).rounded()
+            result = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         } else {
             let width = min(window.width, newWork.width), height = min(window.height, newWork.height)
             let x = relative(window.minX - oldWork.minX, available: oldWork.width - window.width)
             let y = relative(window.minY - oldWork.minY, available: oldWork.height - window.height)
-            result = CGRect(x: newWork.minX + x * (newWork.width - width), y: newWork.minY + y * (newWork.height - height), width: width, height: height)
+            result = CGRect(x: (newWork.minX + x * (newWork.width - width)).rounded(),
+                            y: (newWork.minY + y * (newWork.height - height)).rounded(), width: width, height: height)
         }
         let resize = abs(result.width - window.width) > 0.01 || abs(result.height - window.height) > 0.01
         guard !resize || canResize else { return .resizeUnavailable }
-        guard valid(result), newWork.insetBy(dx: -0.01, dy: -0.01).contains(result) else { return .invalidGeometry }
+        guard valid(result), newWork.insetBy(dx: -0.5, dy: -0.5).contains(result) else { return .invalidGeometry }
         return .move(Self(sourceID: source.id, destinationID: destination.id, frame: result, needsResize: resize))
     }
 
@@ -102,8 +113,14 @@ public struct WindowTransferPlan: Equatable {
         return fractions.first { fraction in
             let expected = CGRect(x: work.minX + fraction.minX * work.width, y: work.minY + fraction.minY * work.height,
                                   width: fraction.width * work.width, height: fraction.height * work.height)
-            return approximatelyEqual(window, expected, tolerance: 2)
+            return edgesMatch(window, expected, tolerance: tileTolerance)
         }
+    }
+
+    /// All four edges within `tolerance` points.
+    public static func edgesMatch(_ a: CGRect, _ b: CGRect, tolerance: CGFloat) -> Bool {
+        valid(a) && valid(b) && abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
+            abs(a.maxX - b.maxX) <= tolerance && abs(a.maxY - b.maxY) <= tolerance
     }
 }
 

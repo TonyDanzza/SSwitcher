@@ -22,7 +22,8 @@ final class WindowTransferPlanTests: XCTestCase {
         XCTAssertEqual(down.frame.size, original.size)
         XCTAssertTrue(laptop.visibleFrame.contains(down.frame))
         let up = try move(down.frame, [monitor, laptop], .up)
-        XCTAssertTrue(WindowTransferPlan.approximatelyEqual(up.frame, original, tolerance: 0.001))
+        // Whole-point targets: a round trip may differ by the rounding point.
+        XCTAssertTrue(WindowTransferPlan.approximatelyEqual(up.frame, original, tolerance: 1))
         for direction in [WindowMoveDirection.left, .right] {
             XCTAssertEqual(WindowTransferPlan.decide(window: original, displays: [monitor, laptop], direction: direction, canResize: true), .noNeighbor)
             XCTAssertEqual(WindowTransferPlan.decide(window: down.frame, displays: [monitor, laptop], direction: direction, canResize: true), .noNeighbor)
@@ -73,8 +74,12 @@ final class WindowTransferPlanTests: XCTestCase {
     func testAlmostTiledWindowOutsideToleranceKeepsItsPointSize() throws {
         let a = display(1, CGRect(x: 0, y: 0, width: 1000, height: 800))
         let b = display(2, CGRect(x: 1000, y: 0, width: 2000, height: 1600))
-        let old = CGRect(x: 3, y: 0, width: 497, height: 800)
-        XCTAssertEqual(try move(old, [a, b], .right).frame.size, old.size)
+        for old in [CGRect(x: 6, y: 0, width: 494, height: 800), CGRect(x: 0, y: 0, width: 506, height: 800),
+                    CGRect(x: 0, y: 0, width: 500, height: 794)] {
+            XCTAssertEqual(try move(old, [a, b], .right).frame.size, old.size)
+        }
+        // Within the tolerance on every edge it is the left half.
+        XCTAssertEqual(try move(CGRect(x: 3, y: 0, width: 497, height: 800), [a, b], .right).frame.size, CGSize(width: 1000, height: 1600))
     }
 
     func testDirectNeighborIsPreferredOverDiagonalAndNearestDiagonalIsGeometric() throws {
@@ -160,5 +165,86 @@ final class WindowTransferPlanTests: XCTestCase {
             XCTAssertFalse(WindowShortcutInteraction.modifierChanged.cancelsMove(key: key, option: false, shift: true))
             XCTAssertTrue(WindowShortcutInteraction.modifierChanged.cancelsMove(key: key, option: true))
         }
+    }
+
+    // Measured on this Mac by the menu bar app (NSScreen, AX coordinates):
+    // LG main display on top, notched MacBook below.
+    private let lg = WindowDisplay(id: 3, frame: CGRect(x: 0, y: 0, width: 2560, height: 1440),
+                                   visibleFrame: CGRect(x: 0, y: 31, width: 2560, height: 1409))
+    private let macBook = WindowDisplay(id: 1, frame: CGRect(x: 579, y: 1440, width: 1470, height: 956),
+                                        visibleFrame: CGRect(x: 579, y: 1474, width: 1470, height: 922))
+
+    func testMeasuredMacOSTilesAreRecognizedOnBothDisplays() throws {
+        // Window menu > Move & Resize frames read back through AX on this Mac.
+        let lgTiles: [(CGRect, CGRect)] = [
+            (CGRect(x: 0, y: 31, width: 2560, height: 1410), CGRect(x: 579, y: 1474, width: 1470, height: 922)),
+            (CGRect(x: 0, y: 31, width: 1281, height: 1410), CGRect(x: 579, y: 1474, width: 735, height: 922)),
+            (CGRect(x: 1280, y: 31, width: 1280, height: 1410), CGRect(x: 1314, y: 1474, width: 735, height: 922)),
+            (CGRect(x: 0, y: 31, width: 1280, height: 706), CGRect(x: 579, y: 1474, width: 735, height: 461)),
+            (CGRect(x: 1279, y: 734, width: 1280, height: 706), CGRect(x: 1314, y: 1935, width: 735, height: 461))
+        ]
+        for (tile, expected) in lgTiles { XCTAssertEqual(try move(tile, [lg, macBook], .down).frame, expected, "\(tile)") }
+        let macTiles: [(CGRect, CGRect)] = [
+            (CGRect(x: 579, y: 1474, width: 1470, height: 923), CGRect(x: 0, y: 31, width: 2560, height: 1409)),
+            (CGRect(x: 579, y: 1474, width: 736, height: 923), CGRect(x: 0, y: 31, width: 1280, height: 1409)),
+            (CGRect(x: 1315, y: 1474, width: 734, height: 923), CGRect(x: 1280, y: 31, width: 1280, height: 1409)),
+            (CGRect(x: 579, y: 1474, width: 735, height: 462), CGRect(x: 0, y: 31, width: 1280, height: 705)),
+            (CGRect(x: 1314, y: 1934, width: 735, height: 462), CGRect(x: 1280, y: 736, width: 1280, height: 704)),
+            // A right half placed by our own earlier move.
+            (CGRect(x: 1314, y: 1474, width: 735, height: 922), CGRect(x: 1280, y: 31, width: 1280, height: 1409))
+        ]
+        for (tile, expected) in macTiles { XCTAssertEqual(try move(tile, [lg, macBook], .up).frame, expected, "\(tile)") }
+    }
+
+    func testWindowLargerThanLaptopShrinksToItsWorkAreaAndKeepsSizeGoingBack() throws {
+        let large = CGRect(x: 300, y: 150, width: 1749, height: 1200)
+        let down = try move(large, [lg, macBook], .down)
+        XCTAssertEqual(down.frame, macBook.visibleFrame)
+        XCTAssertTrue(down.needsResize)
+        XCTAssertEqual(WindowTransferPlan.decide(window: large, displays: [lg, macBook], direction: .down, canResize: false), .resizeUnavailable)
+        // The shrunken window fills the laptop, so it returns as a full tile.
+        XCTAssertEqual(try move(CGRect(x: 579, y: 1474, width: 1470, height: 922), [lg, macBook], .up).frame, lg.visibleFrame)
+    }
+
+    func testWindowAtEdgesKeepsItsEdgeAndWholePointOrigin() throws {
+        let topLeft = try move(CGRect(x: 0, y: 31, width: 600, height: 400), [lg, macBook], .down)
+        XCTAssertEqual(topLeft.frame, CGRect(x: 579, y: 1474, width: 600, height: 400))
+        let bottomRight = try move(CGRect(x: 1960, y: 1040, width: 600, height: 400), [lg, macBook], .down)
+        XCTAssertEqual(bottomRight.frame, CGRect(x: 1449, y: 1996, width: 600, height: 400))
+        // Hanging below the monitor clamps to the laptop's bottom edge.
+        XCTAssertEqual(try move(CGRect(x: 700, y: 1100, width: 600, height: 400), [lg, macBook], .down).frame,
+                       CGRect(x: 890, y: 1996, width: 600, height: 400))
+        // Fractional relative positions (759.66) are rounded, never floored,
+        // so round trips settle instead of creeping by a point each time.
+        let middle = try move(CGRect(x: 407, y: 192, width: 600, height: 340), [lg, macBook], .down).frame
+        XCTAssertEqual(middle, CGRect(x: 760, y: 1562, width: 600, height: 340))
+        let back = try move(middle, [lg, macBook], .up).frame
+        XCTAssertEqual(back.origin, CGPoint(x: 408, y: 193))
+        XCTAssertEqual(try move(back, [lg, macBook], .down).frame, middle)
+        XCTAssertEqual(try move(middle, [lg, macBook], .up).frame, back)
+    }
+
+    func testLaptopLeftMonitorRightWithDifferentHeights() throws {
+        // MacBook main display on the left, a taller monitor to its right,
+        // aligned 200 pt higher. AX origin is the MacBook's top-left.
+        let laptop = WindowDisplay(id: 1, frame: CGRect(x: 0, y: 0, width: 1470, height: 956),
+                                   visibleFrame: CGRect(x: 0, y: 32, width: 1470, height: 924))
+        let monitor = WindowDisplay(id: 2, frame: CGRect(x: 1470, y: -200, width: 2560, height: 1440),
+                                    visibleFrame: CGRect(x: 1470, y: -200, width: 2560, height: 1440))
+        let window = CGRect(x: 100, y: 300, width: 800, height: 500)
+        let right = try move(window, [laptop, monitor], .right)
+        XCTAssertEqual(right.destinationID, 2)
+        XCTAssertEqual(right.frame, CGRect(x: 1733, y: 394, width: 800, height: 500))
+        XCTAssertEqual(try move(right.frame, [laptop, monitor], .left).frame, CGRect(x: 100, y: 300, width: 800, height: 500))
+        XCTAssertEqual(WindowTransferPlan.decide(window: window, displays: [laptop, monitor], direction: .left, canResize: true), .noNeighbor)
+        for direction in [WindowMoveDirection.up, .down] {
+            XCTAssertEqual(WindowTransferPlan.decide(window: window, displays: [laptop, monitor], direction: direction, canResize: true), .noNeighbor)
+        }
+        // Right half of the monitor becomes the right half of the laptop.
+        XCTAssertEqual(try move(CGRect(x: 2750, y: -200, width: 1280, height: 1440), [laptop, monitor], .left).frame,
+                       CGRect(x: 735, y: 32, width: 735, height: 924))
+        // A window taller than the laptop shrinks only in height.
+        XCTAssertEqual(try move(CGRect(x: 1600, y: -100, width: 900, height: 1200), [laptop, monitor], .left).frame.size,
+                       CGSize(width: 900, height: 924))
     }
 }
