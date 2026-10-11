@@ -66,9 +66,11 @@ Synthetic events are marked and excluded from real-input cancellation. Key-down 
 
 ## Window transfer
 
-Option+Shift+arrows choose a neighbor from the actual display topology with no wraparound. Ordinary windows preserve size in points and relative placement where possible. Full/half/quarter work-area geometry maps to the corresponding target fraction. Oversized windows shrink only when supported; fullscreen Spaces are refused.
+Option+Shift+arrows choose a neighbor from the actual display topology with no wraparound. Ordinary windows preserve size in points and relative placement where possible; the target origin is rounded to whole points because AppKit floors fractional origins. Full/half/quarter work-area geometry maps to the corresponding target fraction; a tile is recognized when every edge is within 4 pt (macOS's own tiles differ from exact fractions by 1–2 pt). Oversized windows shrink only when supported; fullscreen Spaces are refused. All geometry is in points: `NSScreen.frame`/`visibleFrame` converted to AX coordinates with the primary display's top.
 
-The original focused window, owner and display snapshot are revalidated before each position/size setter. Each issued step has a bounded acknowledgement check and is not retried blindly. User activity and topology changes cancel pending work.
+The sequence shrinks on the source display, moves, then grows on the destination. Right after a window changes displays, its application still limits a resize to the previous display's edge for about 12–16 ms (TextEdit and Finder on this Mac); no AX notification marks the moment it adopts the new display. Growth after a display change therefore waits 50 ms, and a growth that still comes back short is issued once more after 150 ms.
+
+The original focused window, owner and display snapshot are revalidated before each position/size setter. A step is accepted when the AX frame matches it, when a changed frame stays the same for 40 ms (macOS or the application adjusted it), or when an unchanged frame stays for 200 ms; otherwise it stops at 0.5 s. A later position step is skipped when the origin macOS accepted for the move already holds. The final frame is classified against the plan within 4 pt per edge as moved, adjusted (on the destination display) or unconfirmed. `WindowMoveReport` keeps the displays, plan, steps and final frame, without titles. User activity and topology changes cancel pending work.
 
 ## Idle work, measurement and privacy
 

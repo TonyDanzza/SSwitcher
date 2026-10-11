@@ -1,4 +1,24 @@
-# Validation — 0.1.23 / build 174
+# Validation — 0.1.23 / build 175
+
+## Window transfer — build 175
+
+The user reported that Option+Shift+arrows put a window "in a random place, not the expected size". Display geometry on this Mac, as the menu bar app reads it (AX coordinates, points; both displays at scale 2): LG main display (0, 0, 2560×1440), visible (0, 31, 2560×1409); notched MacBook below (579, 1440, 1470×956), visible (579, 1474, 1470×922). A command-line process reported the MacBook's visible frame 2 pt taller (1472/924); the app's value matches where macOS actually places windows.
+
+Reproduced on build 174 with the real shortcut on a test TextEdit window: the MacBook right half moved up became (1280, 31, 769×1409), "result not confirmed". A test harness that mirrors the controller showed the cause: the size step issued 1–5 ms after the cross-display move was clipped at the previous display's right edge (x = 2049) — full width 2049 instead of 2560. With 0–10 ms between the move and the resize the width was clipped every time; from about 16 ms (TextEdit) or 12 ms (Finder) after the move returned it was not. `AXWindowMoved` arrives about 1.3 ms after the move, before that point, so it cannot serve as the signal. Fractional targets were floored by AppKit (407.77 → 407), so round trips crept by a point.
+
+On build 175, with the real shortcut via System Events, on test windows only (a new TextEdit document and a new Finder window):
+
+- MacBook right half → up: (1280, 31, 1280×1409), 79 ms (Finder 99 ms); back down: (1314, 1474, 735×922).
+- MacBook full → up: (0, 31, 2560×1409), 69 ms (Finder 94 ms); LG full → down: (579, 1474, 1470×922).
+- LG window 1749×1200 → down: shrunk to the MacBook work area.
+- MacBook top-left quarter → up: (0, 31, 1280×705); LG bottom-right quarter → down: (1314, 1935, 735×461).
+- Ordinary 600×340 window, three round trips: settled at (760, 1562) ↔ (408, 193), 3–9 ms per move.
+- A window 85% on the LG, hanging over its bottom edge → down: bottom-aligned on the MacBook; up again: fully inside the LG; up from the LG: "no neighbor".
+
+Every result above was reported as `moved` (within 4 pt of the plan). Not checked: Safari and other applications, Terminal-style size increments, the "tiled windows have margins" setting (off on this Mac), minimum sizes that exceed the target, other physical display arrangements (covered only by unit tests), and the repeated-growth path, which these applications never needed.
+
+`swift test` ran **238 tests with zero failures**. The signed build was installed and its signature checked.
+
 
 ## Refactoring — build 174
 
