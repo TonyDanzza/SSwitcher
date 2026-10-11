@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwitcherCore
 
 final class KeyboardMonitor {
@@ -23,12 +24,22 @@ final class KeyboardMonitor {
     private(set) var syntheticEventCount = 0
     private var detector = DoubleShiftDetector()
     private var typedWord = TypedWordTracker()
+    private var layoutData: CFData?
+    /// Text-free counters explaining why a MAX gesture had no known word.
+    private(set) var typedWordReset = "start"
+    private(set) var typedKeysSinceReset = 0
+    private(set) var translatedKeysSinceReset = 0
     /// Typed characters are remembered only while an editor that needs them
     /// (MAX) is frontmost; switching it off forgets them immediately.
-    var tracksTypedWord = false { didSet { typedWord.reset() } }
+    var tracksTypedWord = false { didSet { forgetTypedWord("activation") } }
     var typedWordCandidate: TypedWordTracker.Candidate { tracksTypedWord ? typedWord.candidate : .unknown }
     func replaceTypedWord(_ word: String, with replacement: String) { typedWord.replaceWord(word, with: replacement) }
-    func forgetTypedWord() { typedWord.reset() }
+    func forgetTypedWord(_ reason: String = "replacement") {
+        typedWord.reset()
+        typedWordReset = reason; typedKeysSinceReset = 0; translatedKeysSinceReset = 0
+    }
+    /// The layout used to translate key codes is read again after a change.
+    func keyboardLayoutChanged() { layoutData = nil }
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     var isRunning: Bool { tap != nil }
@@ -116,13 +127,13 @@ final class KeyboardMonitor {
         tap = nil
         source = nil
         detector.reset()
-        typedWord.reset()
+        forgetTypedWord("stopped")
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             detector.reset()
-            typedWord.reset()
+            forgetTypedWord("tapDisabled")
             burst.cancel()
             pendingDispatch?.cancel()
             inputGeneration &+= 1
@@ -141,7 +152,7 @@ final class KeyboardMonitor {
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         switch type {
         case .keyDown: recordTyping(event, key: key)
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown: typedWord.reset()
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: if tracksTypedWord { forgetTypedWord("click") }
         default: break
         }
         let interaction: WindowShortcutInteraction
@@ -209,12 +220,45 @@ final class KeyboardMonitor {
     /// Runs inside the listening tap: only local string bookkeeping.
     private func recordTyping(_ event: CGEvent, key: UInt16) {
         guard tracksTypedWord else { return }
-        guard event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty else { typedWord.reset(); return }
-        if key == 51 { typedWord.backspace(); return }
+        guard event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty else { forgetTypedWord("shortcut"); return }
+        if key == 51 {
+            let before = typedWord.candidate
+            typedWord.backspace()
+            if before != .unknown, typedWord.candidate == .unknown { forgetTypedWord("backspaceAcrossSpace") }
+            return
+        }
         var length = 0
         var units = [UniChar](repeating: 0, count: 8)
         event.keyboardGetUnicodeString(maxStringLength: units.count, actualStringLength: &length, unicodeString: &units)
-        typedWord.typed(String(utf16CodeUnits: units, count: min(max(length, 0), units.count)))
+        var text = String(utf16CodeUnits: units, count: min(max(length, 0), units.count))
+        // Hardware key events may reach a session tap without their text;
+        // translate the key with the current layout as the editor will.
+        if text.isEmpty, let translated = translate(key, flags: event.flags) {
+            text = translated
+            translatedKeysSinceReset += 1
+        }
+        typedWord.typed(text)
+        if typedWord.candidate == .unknown { forgetTypedWord(text.isEmpty ? "noText" : "controlKey") }
+        else { typedKeysSinceReset += 1 }
+    }
+
+    private func translate(_ key: UInt16, flags: CGEventFlags) -> String? {
+        if layoutData == nil, let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+           let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) {
+            layoutData = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
+        }
+        guard let layoutData, let bytes = CFDataGetBytePtr(layoutData) else { return nil }
+        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var modifiers = 0
+        if flags.contains(.maskShift) { modifiers |= shiftKey }
+        if flags.contains(.maskAlphaShift) { modifiers |= alphaLock }
+        var deadKey: UInt32 = 0
+        var length = 0
+        var buffer = [UniChar](repeating: 0, count: 8)
+        guard UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown), UInt32(modifiers >> 8), UInt32(LMGetKbdType()),
+                             0, &deadKey, buffer.count, &length, &buffer) == noErr,
+              deadKey == 0, length > 0, length <= buffer.count else { return nil }
+        return String(utf16CodeUnits: buffer, count: length)
     }
 
     deinit { stop() }

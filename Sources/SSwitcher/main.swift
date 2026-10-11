@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             let wasConverting = self.editor.isConverting
             let changed = InputSources.sourceChanged()
+            self.monitor.keyboardLayoutChanged()
             if changed { self.monitor.focusChanged() }
             // A confirmed legacy replacement selects its target layout before
             // revealing the image. Idle built-in-layout notices preserve that
@@ -111,7 +112,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let activity = self.monitor.activityGeneration
             if let max = NSWorkspace.shared.frontmostApplication, max.bundleIdentifier == Self.maxBundleID {
                 self.editor.performance.cancelGesture()
-                switch self.monitor.typedWordCandidate {
+                let candidate = self.monitor.typedWordCandidate
+                let kind: String
+                switch candidate { case .unknown: kind = "unknown"; case .afterSpace: kind = "afterSpace"; case .word: kind = "word" }
+                UserDefaults.standard.set(["candidate": kind, "tracking": self.monitor.tracksTypedWord,
+                    "lastReset": self.monitor.typedWordReset, "keysSinceReset": self.monitor.typedKeysSinceReset,
+                    "translatedKeys": self.monitor.translatedKeysSinceReset, "timestamp": Date().timeIntervalSince1970,
+                    "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""],
+                    forKey: "TypedWordStateReport")
+                switch candidate {
                 case .afterSpace:
                     self.lastResult = "Курсор должен стоять в конце слова"
                     self.monitor.conversionFinished(unverified: false)
@@ -223,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 InputSources.selectAfterConversion(conversion.target)
                 self.lastResult = "Слово MAX перепечатано без выделения (\(elapsed) мс)"
             } else {
-                self.monitor.forgetTypedWord()
+                self.monitor.forgetTypedWord("interrupted")
                 self.lastResult = "Замена в MAX прервана вводом; проверьте текст"
             }
             UserDefaults.standard.set(["delivered": delivered, "oneWordDeletion": asOneWord, "characters": count,

@@ -1,6 +1,8 @@
-# Validation — 0.1.23 / build 167
+# Validation — 0.1.23 / build 168
 
-## Freshly typed MAX word — builds 165–167
+## Freshly typed MAX word — builds 165–168
+
+Build 168: the user's hardware-keyboard check on build 167 used the slower Services route, so the typed word was not known. Build 168 translates a key with the current layout when its event carries no text, and records a text-free `TypedWordStateReport` (candidate kind, last reset reason, key counts) for each MAX gesture. The cause is not yet confirmed from that report.
 
 On 11 October 2026, `swift test` ran **227 tests with zero failures**, including tracker and event-batch tests. The signed release build was installed and its signature checked.
 
