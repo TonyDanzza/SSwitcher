@@ -51,7 +51,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // revealing the image. Idle built-in-layout notices preserve that
             // reveal; an active attempt still cancels.
             if changed && wasConverting { self.editor.overlay.cancel() }
-            self.rebuildMenu()
         }
         windowHotKeys.onMove = { [weak self] direction in
             guard let self else { return }
@@ -68,7 +67,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             self?.nativeServices.cancelVisualShield()
             self?.refreshWindowShortcuts()
-            self?.rebuildMenu()
         }
         monitor.onUserActivity = { [weak self] in
             guard let overlay = self?.editor.overlay, !overlay.isIdle else { return }
