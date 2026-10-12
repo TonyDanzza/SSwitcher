@@ -9,6 +9,8 @@
 - `MaxConversionRouter`: picks the MAX route with the pure `MaxConversionRoute` (retype a typed word, one direct Services request, or the full Services transaction) and runs it.
 - `NativeServiceProvider`, `NativeSelectionServiceProof` and `NativeWordServiceCoordinator`: the MAX Services provider (Cmd+F19 packet, Cmd+F20 barrier) and its transaction.
 - `WindowMoveController`: directional window transfer using Accessibility; `WindowMoveHotKeys` owns the Carbon shortcut registrations.
+- `FunctionKeyController` and `FunctionKeyHotKey`: the top-row mode (pure rules in `FunctionKeyPolicy`) and its Control+Option+Command+F shortcut; `StatusHUD` confirms the shortcut.
+- `KeepAwakeController`: one display-sleep power assertion with a timer and a battery stop (parsing and plurals in `KeepAwakeDuration`).
 - `DiagnosticsWindow`, `PerformanceRecorder` and `ReplacementOverlay`: status, bounded measurements and an optional visual transition for editors with reliable geometry.
 
 The app uses AppKit. External Accessibility reads are serialized off the main thread; own UI and Services callbacks stay on the main thread. The normal build includes no third-party dependencies or network behavior.
@@ -71,6 +73,14 @@ Option+Shift+arrows choose a neighbor from the actual display topology with no w
 The sequence shrinks on the source display, moves, then grows on the destination. Right after a window changes displays, its application still limits a resize to the previous display's edge for about 12–16 ms (TextEdit and Finder on this Mac); no AX notification marks the moment it adopts the new display. Growth after a display change therefore waits 50 ms, and a growth that still comes back short is issued once more after 150 ms.
 
 The original focused window, owner and display snapshot are revalidated before each position/size setter. A step is accepted when the AX frame matches it, when a changed frame stays the same for 40 ms (macOS or the application adjusted it), or when an unchanged frame stays for 200 ms; otherwise it stops at 0.5 s. A later position step is skipped when the origin macOS accepted for the move already holds. The final frame is classified against the plan within 4 pt per edge as moved, adjusted (on the destination display) or unconfirmed. `WindowMoveReport` keeps the displays, plan, steps and final frame, without titles. User activity and topology changes cancel pending work.
+
+## Top-row mode
+
+The base mode is the global preference `com.apple.keyboard.fnState`, the same one System Settings writes; it is reread on every application switch, so a change made there is adopted. The live mode is IOHIDSystem's `HIDFKeyMode` parameter, read with `IOHIDCopyCFTypeParameter` and set with `IOHIDSetCFTypeParameter` through a `kIOHIDParamConnectType` connection (no privacy permission). A base change writes both. An application rule (stored by bundle identifier in `functionKeyApplications`) only sets the live parameter while that application is frontmost; SSwitcher itself and non-Dock agents such as loginwindow never get rules. Quitting sets the live parameter back to the preference. The shortcut is a Carbon hot key, independent of the listening event tap.
+
+## Keep awake
+
+`IOPMAssertionCreateWithProperties` creates one `PreventUserIdleDisplaySleep` assertion. A timed assertion carries `TimeoutSeconds` with `TimeoutActionRelease`, so powerd releases it on schedule even if SSwitcher stops; the app timer (plus a wake check, since timers do not advance during sleep) only clears the menu and the icon dot. While active, an `IOPSNotificationCreateRunLoopSource` source stops it on battery power below 20%. Nothing persists across launches except the last custom duration.
 
 ## Idle work, measurement and privacy
 

@@ -30,14 +30,19 @@ enum BrandIcon {
         return [upper, lower]
     }
 
-    static func menuImage() -> NSImage {
+    /// A small filled dot in the free top-right corner marks "keep awake".
+    static func menuImage(keepingAwake: Bool = false) -> NSImage {
         let image = NSImage(size: NSSize(width: 22, height: 20), flipped: false) { rect in
             NSColor.black.setStroke()
             for path in paths(in: rect) { path.stroke() }
+            if keepingAwake {
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: NSRect(x: rect.maxX - 4.5, y: rect.maxY - 4.5, width: 3.5, height: 3.5)).fill()
+            }
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "SSwitcher"
+        image.accessibilityDescription = keepingAwake ? "SSwitcher, не засыпать" : "SSwitcher"
         return image
     }
 }

@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let loginAtLaunch = LoginAtLaunch()
     private let windowMoves = WindowMoveController()
     private let windowHotKeys = WindowMoveHotKeys()
+    private let functionKeys = FunctionKeyController()
+    private let keepAwake = KeepAwakeController()
     private let nativeServices = NativeServiceProvider()
     private lazy var maxRouter = MaxConversionRouter(monitor: monitor, services: nativeServices)
     private var windowMovementEnabled = !UserDefaults.standard.bool(forKey: "windowMovementDisabled")
@@ -59,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.editor.overlay.cancel()
             self.windowMoves.move(direction)
         }
+        keepAwake.onChange = { [weak self] in self?.refreshStatusIcon() }
+        functionKeys.start()
         windowMoves.onResult = { [weak self] in
             guard let self else { return }
             self.statusItem.button?.toolTip = self.windowMoves.lastResult
@@ -154,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.editor.overlay.cancel()
             self.refreshPermissions()
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self.functionKeys.frontmostChanged(app)
             self.refreshTypedWordTracking(frontmost: app)
             if InputMethodIdentity.currentMode == nil, let app { self.editor.prepareAccessibility(for: app) }
         }
@@ -163,6 +168,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshPermissions()
         rebuildMenu()
         if CommandLine.arguments.contains("--check") { presentDiagnostics(activateApplication: false) }
+    }
+
+    private func refreshStatusIcon() {
+        statusItem.button?.image = BrandIcon.menuImage(keepingAwake: keepAwake.isActive)
+        let label = ["SSwitcher — исправление раскладки", keepAwake.iconDescription].compactMap { $0 }.joined(separator: ", ")
+        statusItem.button?.setAccessibilityLabel(label)
     }
 
     /// The MAX snapshot for a direct word request starts at the gesture
@@ -254,6 +265,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             else if windowHotKeys.lastError != nil { add("Горячие клавиши переноса недоступны", to: menu) }
             else { add("Перенос ждёт второго дисплея", to: menu) }
         }
+        menu.addItem(.separator())
+        for item in functionKeys.menuItems(frontmost: NSWorkspace.shared.frontmostApplication) { menu.addItem(item) }
+        menu.addItem(.separator())
+        for item in keepAwake.menuItems() { menu.addItem(item) }
         menu.addItem(.separator())
         let login = add("Запускать при входе в macOS", action: #selector(toggleLoginAtLaunch), to: menu)
         login.state = loginAtLaunch.state
@@ -350,6 +365,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.editor.diagnosticDetails,
                     self.windowMoves.lastResult,
                     self.windowMoves.lastDetails,
+                    self.functionKeys.statusDescription,
+                    self.keepAwake.statusDescription,
                     self.editor.overlay.lastStatus,
                     self.editor.performance.diagnosticStatus,
                     self.nativeServices.conversionStatus
@@ -375,6 +392,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.servicesProvider = nil
         windowHotKeys.stop()
         windowMoves.cancel()
+        functionKeys.restoreBase()
+        keepAwake.stop()
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }

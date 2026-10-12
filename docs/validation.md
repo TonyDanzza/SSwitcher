@@ -1,4 +1,19 @@
-# Validation — 0.1.23 / build 177
+# Validation — 0.1.24 / build 178
+
+## Top-row mode and keep awake — build 178
+
+New: the top-row (F1–F12 / media keys) toggle with Control+Option+Command+F and per-application rules, and "Не засыпать" with presets, a custom duration and a 20% battery stop.
+
+On 12 October 2026, macOS 27.0.1, MacBook Air (Mac16,12), on battery at 71%:
+
+- Before the change, `HIDFKeyMode` (IOHIDSystem) and `com.apple.keyboard.fnState` both read 0; build 178 launched with no rules left both unchanged.
+- The status menu, read through System Events, showed the new items; the frontmost process at that moment was loginwindow (screen locked), which led to excluding non-Dock agents from rules.
+- "Не засыпать → 15 минут": `pmset -g assertions` listed SSwitcher's `PreventUserIdleDisplaySleep` with "Timeout will fire in 889 secs Action=TimeoutActionRelease"; the menu showed "ещё 15 мин" and the end time. "Выключить" removed the assertion. The Cyrillic assertion name printed as empty in pmset, so the name is now ASCII.
+
+Not checked by the agent: switching the top-row mode and pressing F-keys (the user's own keyboard setting; synthetic events do not pass through the F-key mapping), the shortcut and its notice, per-application rules, the custom-duration dialog, the battery stop below 20%, expiry after sleep. The icon dot was checked as a rendered image only.
+
+Afterwards the user checked build 178 on this Mac and reported that everything works.
+
 
 ## Pages — build 177
 
