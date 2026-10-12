@@ -13,6 +13,7 @@ struct SettingsPanes: View {
     @ObservedObject var status: SettingsStatus
     @ObservedObject var functionKeys: FunctionKeyController
     @ObservedObject var displays: DisplayController
+    @ObservedObject var mouse: MouseController
     let actions: SettingsActions
 
     var body: some View {
@@ -23,6 +24,7 @@ struct SettingsPanes: View {
             case .layout: layout
             case .windows: windows
             case .keyboard: keyboard
+            case .mouse: mousePane
             case .keepAwake: keepAwake
             case .check: check
             }
@@ -380,6 +382,100 @@ struct SettingsPanes: View {
             } header: {
                 Text("Свой режим в программах")
             } footer: { note("Пока программа активна, действует её режим. При переходе в другую программу возвращается общий.") }
+        }
+    }
+
+    // MARK: Мышь
+
+    private var mousePane: some View {
+        Form {
+            if !status.accessibility {
+                Section {
+                    LabeledContent {
+                        Button("Разрешить…", action: actions.requestAccessibility)
+                    } label: {
+                        titled("Нужен Универсальный доступ", "Без него SSwitcher не может менять прокрутку и кнопки мыши.")
+                    }
+                }
+            }
+            Section {
+                Toggle(isOn: $settings.mouseWheelReversed) {
+                    titled("Обратная прокрутка колеса",
+                           "Колесо мыши крутит страницу в другую сторону. Трекпад и Magic Mouse прокручивают как прежде.")
+                }
+            }
+            Section {
+                if settings.mouseButtons.isEmpty && !mouse.isRecording {
+                    Text("Кнопок пока нет").foregroundStyle(.secondary)
+                }
+                ForEach(settings.mouseButtons) { binding in
+                    mouseButtonRow(binding)
+                }
+                if mouse.isRecording {
+                    LabeledContent("Нажмите кнопку мыши…") {
+                        Button("Отмена") { mouse.cancelRecording() }
+                    }
+                } else {
+                    Button("Добавить кнопку…", action: recordMouseButton)
+                        .disabled(!status.accessibility)
+                }
+            } header: {
+                Text("Кнопки мыши")
+            } footer: { note("Нажмите «Добавить кнопку…», а затем среднюю или боковую кнопку мыши, можно вместе с ⌘, ⌥, ⌃ или ⇧. Левая и правая кнопки не назначаются. «Назад» и «Вперёд» нажимают ⌘[ и ⌘]: так листают браузеры, Finder и большинство программ.") }
+        }
+    }
+
+    private func mouseButtonRow(_ binding: MouseButtonBinding) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "computermouse").foregroundStyle(.secondary)
+            Text(binding.title)
+            Spacer()
+            if case .shortcut(let keys) = binding.action {
+                ShortcutField(shortcut: Binding(get: { keys }, set: { setMouseAction(.shortcut($0), for: binding.id) }),
+                              anyKey: true, onRecordingChange: actions.recordingShortcut)
+                    .frame(width: 130, height: 24)
+            }
+            Picker("Действие", selection: Binding(
+                get: { binding.action.kind },
+                set: { kind in if kind != binding.action.kind { setMouseAction(MouseAction(kind: kind), for: binding.id) } })) {
+                ForEach(MouseAction.Kind.allCases, id: \.self) { Text(Self.title(of: $0)).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            Button { settings.mouseButtons.removeAll { $0.id == binding.id } } label: {
+                Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Убрать кнопку")
+            .accessibilityLabel("Убрать: \(binding.title)")
+        }
+    }
+
+    private func setMouseAction(_ action: MouseAction, for id: String) {
+        guard let index = settings.mouseButtons.firstIndex(where: { $0.id == id }) else { return }
+        settings.mouseButtons[index].action = action
+    }
+
+    /// A button already in the list keeps its action.
+    private func recordMouseButton() {
+        mouse.record { button, modifiers in
+            guard !settings.mouseButtons.contains(where: { $0.matches(button: button, modifiers: modifiers) }),
+                  let binding = MouseButtonBinding(button: button, modifiers: modifiers,
+                                                   action: MouseButtonBinding.suggestedAction(for: button)) else { return }
+            settings.mouseButtons.append(binding)
+        }
+    }
+
+    private static func title(of kind: MouseAction.Kind) -> String {
+        switch kind {
+        case .back: "Назад"
+        case .forward: "Вперёд"
+        case .missionControl: "Mission Control"
+        case .applicationWindows: "Окна программы"
+        case .desktop: "Рабочий стол"
+        case .spaceLeft: "Пространство слева"
+        case .spaceRight: "Пространство справа"
+        case .shortcut: "Сочетание клавиш"
         }
     }
 

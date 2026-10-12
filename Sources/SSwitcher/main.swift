@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let functionKeys = FunctionKeyController()
     let keepAwake = KeepAwakeController()
     let displayController = DisplayController()
+    let mouse = MouseController()
     private let nativeServices = NativeServiceProvider()
     private lazy var maxRouter = MaxConversionRouter(monitor: monitor, services: nativeServices)
     let settings = AppSettings.shared
@@ -79,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepAwake.setShortcut(settings.keepAwakeShortcut)
         settings.onChange = { [weak self] in self?.settingsChanged() }
         applyDoubleShiftSettings()
+        applyMouseSettings()
         AppMainMenu.install(target: self, settings: #selector(showSettings), about: #selector(showAbout))
         windowMoves.onResult = { [weak self] in
             guard let self else { return }
@@ -246,6 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             monitor.focusChanged()
         }
         applyDoubleShiftSettings()
+        applyMouseSettings()
         if !settings.smoothReplacement { editor.overlay.cancel() }
         if !isRecordingShortcut {
             functionKeys.setShortcut(settings.functionKeyShortcut)
@@ -256,6 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshSettingsStatus()
         // An open menu keeps its rows; only their text and switches change.
         updateMenuRows()
+    }
+
+    private func applyMouseSettings() {
+        mouse.configure(reverseWheel: settings.mouseWheelReversed, bindings: settings.mouseButtons)
     }
 
     // MARK: Diagnostics
@@ -286,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             windowMoves.lastDetails,
             functionKeys.statusDescription,
             keepAwake.statusDescription,
+            mouse.statusDescription,
             editor.overlay.lastStatus,
             editor.performance.diagnosticStatus,
             nativeServices.conversionStatus
@@ -298,6 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.servicesProvider = nil
         windowHotKeys.stop()
         windowMoves.cancel()
+        mouse.shutdown()
         functionKeys.restoreBase()
         keepAwake.stop()
         keepAwake.setShortcut(nil)

@@ -42,6 +42,10 @@ final class AppSettings: ObservableObject {
     /// 0 means "until turned off".
     @Published var keepAwakeShortcutMinutes: Int { didSet { save(keepAwakeShortcutMinutes, "keepAwakeShortcutMinutes") } }
 
+    // Mouse
+    @Published var mouseWheelReversed: Bool { didSet { save(mouseWheelReversed, "mouseWheelReversed") } }
+    @Published var mouseButtons: [MouseButtonBinding] { didSet { save(mouseButtons.map(\.storage), "mouseButtonBindings") } }
+
     var windowDirectionChoice: WindowDirectionChoice { windowDirectionsManual ? .manual(windowDirections) : .automatic }
 
     private init() {
@@ -70,6 +74,8 @@ final class AppSettings: ObservableObject {
         keepAwakeStopOnUnplug = d.bool(forKey: "keepAwakeStopOnUnplug")
         keepAwakeShortcut = KeyShortcut(storage: d.dictionary(forKey: "keepAwakeShortcut"))
         keepAwakeShortcutMinutes = d.object(forKey: "keepAwakeShortcutMinutes") as? Int ?? 60
+        mouseWheelReversed = d.bool(forKey: "mouseWheelReversed")
+        mouseButtons = MouseButtonBinding.list(from: d.array(forKey: "mouseButtonBindings") as? [[String: Any]] ?? [])
     }
 
     /// "Двойной Shift", "Двойной левый ⌥".
@@ -95,6 +101,8 @@ final class AppSettings: ObservableObject {
 /// Names for shortcut fields and menus: "⌃⌥⌘F", "⌥⇧↑".
 enum KeyNames {
     static func string(_ shortcut: KeyShortcut) -> String { shortcut.modifiers.symbols + key(shortcut.keyCode) }
+
+    static func isFunctionKey(_ code: UInt32) -> Bool { functionKeys[code] != nil }
 
     static func key(_ code: UInt32) -> String {
         if let name = special[code] { return name }

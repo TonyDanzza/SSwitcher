@@ -13,6 +13,9 @@ final class ShortcutRecorderView: NSView {
     var validate: ((KeyShortcut) -> String?)?
     /// Asks before taking a combination something else uses; false keeps the old one.
     var confirm: ((KeyShortcut) -> Bool)?
+    /// Any combination, even one a global shortcut may not use: it is only
+    /// posted, never registered.
+    var anyKey = false
 
     private var isRecording = false {
         didSet {
@@ -90,8 +93,8 @@ final class ShortcutRecorderView: NSView {
         let candidate = KeyShortcut(keyCode: UInt32(event.keyCode), modifiers: KeyShortcut.Modifiers(flags: flags))
         let problem: String?
         switch candidate.problem {
-        case .needsModifier: problem = "Добавьте ⌃, ⌥ или ⌘"
-        case .reserved: problem = "Занято macOS"
+        case .needsModifier: problem = anyKey ? nil : "Добавьте ⌃, ⌥ или ⌘"
+        case .reserved: problem = anyKey ? nil : "Занято macOS"
         case .modifierKey: return
         case nil: problem = validate?(candidate)
         }
@@ -153,6 +156,7 @@ struct ShortcutField: NSViewRepresentable {
     @Binding var shortcut: KeyShortcut?
     var validate: ((KeyShortcut) -> String?)?
     var confirm: ((KeyShortcut) -> Bool)?
+    var anyKey = false
     var onRecordingChange: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> ShortcutRecorderView {
@@ -168,6 +172,7 @@ struct ShortcutField: NSViewRepresentable {
         if view.shortcut != shortcut { view.shortcut = shortcut }
         view.validate = validate
         view.confirm = confirm
+        view.anyKey = anyKey
         view.onChange = { shortcut = $0 }
         view.onRecordingChange = onRecordingChange
     }

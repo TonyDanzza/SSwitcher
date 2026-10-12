@@ -6,6 +6,7 @@ extension AppDelegate {
     /// Only retry while permissions/startup are missing, for at most 30 seconds.
     /// Menu/app activation/open are recovery points after that bounded window.
     func refreshPermissions(startRetry: Bool = true) {
+        mouse.refresh()
         guard enabled || windowMovementEnabled else {
             if monitor.isRunning { monitor.stop() }
             refreshWindowShortcuts()

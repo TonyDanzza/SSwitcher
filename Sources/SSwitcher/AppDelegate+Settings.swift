@@ -51,7 +51,7 @@ extension AppDelegate {
                                                   in: self.settingsWindow?.window)
                 })
             let window = SettingsWindowController(settings: settings, status: settingsStatus, functionKeys: functionKeys,
-                                                  displays: displayController, actions: actions)
+                                                  displays: displayController, mouse: mouse, actions: actions)
             window.onVisibilityChange = { [weak self] visible in self?.settingsVisibilityChanged(visible) }
             window.onTabChange = { [weak self] _ in self?.refreshSettingsStatus() }
             settingsWindow = window
@@ -74,6 +74,7 @@ extension AppDelegate {
             settingsTimer?.tolerance = 0.3
         } else {
             if isRecordingShortcut { recordingShortcut(false) }
+            mouse.cancelRecording()
             NSApp.setActivationPolicy(.accessory)
         }
     }

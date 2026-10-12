@@ -4,7 +4,7 @@ import SwiftUI
 import SwitcherCore
 
 enum SettingsTab: Int, CaseIterable {
-    case general, layout, windows, displays, keyboard, keepAwake, check
+    case general, layout, windows, displays, keyboard, mouse, keepAwake, check
 
     var title: String {
         switch self {
@@ -13,6 +13,7 @@ enum SettingsTab: Int, CaseIterable {
         case .windows: return "Окна"
         case .displays: return "Дисплеи"
         case .keyboard: return "Клавиатура"
+        case .mouse: return "Мышь"
         case .keepAwake: return "Не засыпать"
         case .check: return "Проверка"
         }
@@ -25,6 +26,7 @@ enum SettingsTab: Int, CaseIterable {
         case .windows: return "macwindow.on.rectangle"
         case .displays: return "display"
         case .keyboard: return "keyboard"
+        case .mouse: return "computermouse"
         case .keepAwake: return "cup.and.saucer"
         case .check: return "stethoscope"
         }
@@ -102,6 +104,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private static let tabKey = "settingsPane"
 
     init(settings: AppSettings, status: SettingsStatus, functionKeys: FunctionKeyController, displays: DisplayController,
+         mouse: MouseController,
          actions: SettingsActions) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SettingsPanes.width, height: SettingsPanes.height),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
@@ -115,7 +118,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         tabs.transitionOptions = []
         for tab in SettingsTab.allCases {
             let pane = SettingsPanes(tab: tab, settings: settings, status: status, functionKeys: functionKeys,
-                                     displays: displays, actions: actions)
+                                     displays: displays, mouse: mouse, actions: actions)
             let host = NSHostingController(rootView: pane)
             host.title = tab.title
             host.sizingOptions = []
