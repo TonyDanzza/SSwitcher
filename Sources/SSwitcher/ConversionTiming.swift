@@ -3,7 +3,8 @@
 enum ConversionTiming {
     // Services callbacks arrive before the requesting editor resumes its
     // responder loop. These finite waits apply only to MAX native requests.
-    static let nativeServiceReturnSettle = 0.25
+    // 75 ms lost a MAX word request (1 of 3); 100 and 150 ms passed 10/10.
+    static let nativeServiceReturnSettle = 0.15
     static let nativeNavigationSettle = 0.05
     static let nativeServiceReplyDeadline = 0.6
     static let nativeWordDeadline = 4.0

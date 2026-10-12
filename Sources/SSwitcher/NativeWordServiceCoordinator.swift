@@ -3,32 +3,24 @@ import Carbon
 import SwitcherCore
 
 /// Native MAX transaction: ask the current responder about selection first,
-/// then prove the right boundary before selecting and replacing a word.
+/// then select and replace the word before the caret in one request.
 /// No ordinary clipboard, modifier presses or text injection.
 final class NativeWordServiceCoordinator {
-    private final class Packet {
-        var state = NativeSelectionReadState()
-        let noSelection: (() -> Void)?
-        let completion: (String) -> Void
-        init(_ completion: @escaping (String) -> Void, noSelection: (() -> Void)?) {
-            self.completion = completion; self.noSelection = noSelection
-        }
-    }
     private let pid: pid_t
     private let window: AXUIElement
     private let valid: () -> Bool
     private let beforeKeys: () -> Bool
     private let prepareWord: (@escaping () -> Void) -> Void
     private let completion: (Bool, String) -> Void
-    /// The caller tracked that no selection can exist, so the selection and
-    /// boundary probes (each followed by a native return settle) are skipped:
-    /// one Option+Shift+Left + conversion request replaces the word before
-    /// the caret, keeping whitespace the caret followed.
-    private let direct: Bool
+    /// One Option+Shift+Left + conversion request replaces the word before
+    /// the caret, keeping whitespace the caret followed. Set from the start
+    /// when the caller tracked that no selection can exist (the selection
+    /// probe and its native return settle are skipped), or after the probe
+    /// found no selection. A caret inside a word converts the part to its left.
+    private var direct: Bool
     /// Converted packet text after a published direct response, for the
     /// caller's typed-word memory; never stored.
     private(set) var convertedText: String?
-    private var packet: Packet?
     private var timeout: DispatchWorkItem?
     private var finished = false
     private var committing = false
@@ -87,6 +79,7 @@ final class NativeWordServiceCoordinator {
             // Both queued requests have returned without any replacement
             // publication. A stale AXEnabled menu value is not consulted.
             committing = false
+            direct = true
             phase = "preparingWord"
             record("selectionEmpty")
             // Capture does not navigate or invoke another service. Prepare it
@@ -97,41 +90,21 @@ final class NativeWordServiceCoordinator {
                 guard let self, self.live else { return }
                 DispatchQueue.main.asyncAfter(deadline: readyAt) { [weak self] in
                     guard let self, self.live else { return }
-                    self.startBoundary()
+                    self.selectWord()
                 }
             }
         }
     }
 
-    private func startBoundary() {
-        phase = "boundary"
-        // The return-only service is an actual responder-loop barrier after
-        // the selected-text request, including at an empty EOF caret. A
-        // missing callback/timeout alone is never treated as EOF.
-        read({ [weak self] following in
-            guard let self, self.live else { return }
-            guard NativeWordBoundaryPlan.isFollowingDelimiter(following) else {
-                self.perform(kVK_LeftArrow) { [weak self] in
-                    self?.fail("Курсор должен стоять в конце преобразуемого слова")
-                }
-                return
-            }
-            self.selectWord(restoreBoundary: true)
-        }, noSelection: { [weak self] in self?.selectWord() },
-           navigation: [(CGKeyCode(kVK_RightArrow), .maskShift)])
-    }
-
-    private func selectWord(restoreBoundary: Bool = false) {
+    private func selectWord() {
         guard live else { return }
-        guard waitForModifiers({ [weak self] in self?.selectWord(restoreBoundary: restoreBoundary) }) else { return }
+        guard waitForModifiers({ [weak self] in self?.selectWord() }) else { return }
         // Both commands share one native window/event queue. The service
         // receives the actual selection, validates it, and returns its
         // replacement in that same call. No extra read/navigation/AX action
         // occurs while the word is selected.
-        issue((restoreBoundary ? [(CGKeyCode(kVK_LeftArrow), CGEventFlags())] : []) + [
-                (CGKeyCode(kVK_LeftArrow), [.maskAlternate, .maskShift]),
-                (CGKeyCode(kVK_F19), .maskCommand)
-              ], unavailable: "Нативная замена слова недоступна", before: {
+        issue([(CGKeyCode(kVK_LeftArrow), [.maskAlternate, .maskShift]), (CGKeyCode(kVK_F19), .maskCommand)],
+              unavailable: "Нативная замена слова недоступна", before: {
             phase = "wordCommit"
             committing = true
             wordIssuedAt = ProcessInfo.processInfo.systemUptime
@@ -249,81 +222,14 @@ final class NativeWordServiceCoordinator {
         }
     }
 
-    private func read(_ completion: @escaping (String) -> Void, noSelection: (() -> Void)? = nil,
-                      navigation: [(CGKeyCode, CGEventFlags)] = []) {
-        guard live else { return }
-        guard waitForModifiers({ [weak self] in self?.read(completion, noSelection: noSelection, navigation: navigation) }) else { return }
-        let ticket = Packet(completion, noSelection: noSelection)
-        issue(navigation + [(CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)],
-              unavailable: "Нативное чтение MAX недоступно", before: {
-            record("reading")
-            packet = ticket
-            armPacketTimeout(ticket)
-        }) { [weak self] delivered in
-            guard let self, self.live, self.packet === ticket else { return }
-            guard delivered else { self.fail("Вызов службы не доставлен MAX"); return }
-            ticket.state.delivery(true)
-            self.completePacket(ticket)
-        }
-    }
-
-    private func armPacketTimeout(_ ticket: Packet) {
-        timeout?.cancel()
-        let item = DispatchWorkItem { [weak self, weak ticket] in
-            guard let self, let ticket, self.live, self.packet === ticket else { return }
-            self.fail("MAX не подтвердил нативное чтение и завершение вызова")
-        }
-        timeout = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeServiceReplyDeadline, execute: item)
-    }
-
-    /// Called only by the native return-only requestor after the preceding
-    /// read service. No AX IPC is made while that responder waits on us.
+    /// Called only by the native return-only requestor after the selection
+    /// request. No AX IPC is made while that responder waits on us.
     func receiveBarrier() {
-        if live, phase == "selection" {
-            selectionState.receiveBarrier()
-            RunLoop.main.perform(inModes: [.common]) { [weak self] in self?.completeSelection() }
-            return
-        }
-        guard live, phase == "boundary", let ticket = packet else { return }
-        ticket.state.receiveBarrier()
-        RunLoop.main.perform(inModes: [.common]) { [weak self, weak ticket] in
-            guard let self, let ticket, self.live, self.packet === ticket else { return }
-            self.completePacket(ticket)
-        }
+        guard live, phase == "selection" else { return }
+        selectionState.receiveBarrier()
+        RunLoop.main.perform(inModes: [.common]) { [weak self] in self?.completeSelection() }
     }
 
-    func receivePacket(_ text: String) -> Bool {
-        guard live, let ticket = packet, ticket.state.receive(text) else { return false }
-        RunLoop.main.perform(inModes: [.common]) { [weak self, weak ticket] in
-            guard let self, let ticket, self.packet === ticket else { return }
-            guard self.live, self.beforeKeys() else { self.fail("Нативный контекст MAX изменился"); return }
-            self.completePacket(ticket)
-        }
-        return true
-    }
-
-    private func completePacket(_ ticket: Packet) {
-        guard live, packet === ticket, let result = ticket.state.result else { return }
-        guard result != .rejected else { fail("MAX предоставил некорректный нативный ответ"); return }
-        packet = nil; timeout?.cancel(); timeout = nil
-        // A provider callback is not the requestor's resumed event loop.
-        // Keep the established bounded return settle before the next native
-        // navigation; never use a missing reply/timeout to infer EOF.
-        DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeServiceReturnSettle) { [weak self] in
-            guard let self, self.live else { return }
-            if case .selection(let text) = result {
-                self.record("packetReady")
-                ticket.completion(text)
-                return
-            }
-            guard let noSelection = ticket.noSelection, self.beforeKeys() else {
-                self.fail("MAX не предоставил нативный текст"); return
-            }
-            self.record("nativeEmptyBoundary")
-            noSelection()
-        }
-    }
 
     private func waitForModifiers(_ retry: @escaping () -> Void) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
@@ -363,7 +269,7 @@ final class NativeWordServiceCoordinator {
         if phase != "failed" { record(committing ? "closed" : "cancelled") }
         finished = true; timeout?.cancel(); timeout = nil
         KeyboardEvents.cancelDelivery()
-        packet = nil; plan = nil; modifierWait = nil
+        plan = nil; modifierWait = nil
     }
 
     private func record(_ stage: String, reason: String? = nil) {

@@ -185,28 +185,11 @@ final class NativeSelectionServiceProof {
     }
 
     /// The two-way native request performs the word replacement in its first
-    /// callback only while our current gesture owns the commit. Boundary reads
-    /// remain zero-write.
+    /// callback only while our current gesture owns the commit.
     func convertWordPacketIfRequested(_ packet: NSPasteboard,
         error: AutoreleasingUnsafeMutablePointer<NSString?>?) -> Bool {
         guard Thread.isMainThread, automatic?.word?.isAwaitingConversion == true else { return false }
         convert(packet, error: error)
-        return true
-    }
-
-    /// Readonly selected packet for the native word transaction. No remote AX
-    /// calls or returned data: the requestor retains its current selection.
-    func receiveWordPacket(_ packet: NSPasteboard) -> Bool {
-        guard Thread.isMainThread, let request = automatic, let word = request.word else { return false }
-        DiagnosticReports.shared.record("NativeWordPacketReport", ["stage": "callbackReceived",
-            "foregroundMAX": foregroundMatches(request.identity),
-            "foregroundOwn": NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
-            "providerActive": NSApp.isActive, "inputUnchanged": request.valid(),
-            "hostActive": NSRunningApplication(processIdentifier: request.identity.pid)?.isActive == true,
-            "menuOwnerMAX": NSWorkspace.shared.menuBarOwningApplication?.processIdentifier == request.identity.pid])
-        guard request.valid(), contextMatches(request.identity), NativeServicePacket.isDedicated(packet.name),
-              packet.availableType(from: [.string]) == .string, let text = packet.string(forType: .string) else { return true }
-        _ = word.receivePacket(text)
         return true
     }
 

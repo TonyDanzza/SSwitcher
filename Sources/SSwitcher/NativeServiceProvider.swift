@@ -33,20 +33,12 @@ final class NativeServiceProvider: NSObject {
         guard let error else { return }
         error.pointee = "SSwitcher: проверка завершена, текст не изменён" as NSString
         // The gesture-owned commit consumes this exact native packet once.
-        // It owns response cleanup itself; readonly requests below always
-        // leave no return formats.
+        // It owns response cleanup itself.
         if selectionProof.convertWordPacketIfRequested(pasteboard, error: error) { return }
-        defer { NativeServicePacket.discardReturnValue(pasteboard) }
-        guard Thread.isMainThread else { return }
         // A two-way declaration keeps MAX active. Never leave the sent text
         // as a return value: Qt could insert it again and collapse selection.
         // Clear formats, not an empty string (which would delete selection).
-        // A successful read is not a failed service. Returning an error can
-        // interrupt the requestor's queued Services/navigation. The deferred
-        // discard leaves no return formats, so Qt has no text to commit.
-        if selectionProof.receiveWordPacket(pasteboard), NativeServicePacket.isDedicated(pasteboard.name) {
-            error.pointee = nil
-        }
+        _ = NativeServicePacket.discardReturnValue(pasteboard)
     }
 
     @objc(checkNativeEditable:userData:error:)

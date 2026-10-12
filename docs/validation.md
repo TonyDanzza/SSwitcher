@@ -163,6 +163,8 @@ Screenshots of the actual composer were checked in addition to service reports. 
 
 One final word conversion took 317 ms, including a 17 ms commit stage. These are individual measurements, not benchmark percentiles or compositor timings. The existing 250 ms requestor-return settle remains; this change does not establish a latency improvement.
 
+Build 185 drops the right-boundary read from the full Services route: after an empty selection probe it runs the direct word request. One requestor-return settle remains, shortened from 250 to 150 ms. On the MacBook display, in the user's own chat draft, a word typed and followed by Cmd+Right (which forces the full route) was converted 10/10 times at 150 ms (transaction ~200 ms) and 10/10 at 100 ms (~145 ms). At 75 ms the third request was lost: MAX gave no word packet, the text stayed unchanged and unselected. Composer captures confirmed alternating `ghbdtn` ↔ `привет`. The full route measured ~590 ms on build 183 and 340 ms with the 250 ms settle. No messages were sent and the draft was left empty.
+
 ## Snapshot presentation checks
 
 Build 154 hid selection but the user reported that the whole MAX window jerked. A short, local ScreenCaptureKit recording reproduced scaling of the snapshot during panel presentation/removal. A stable snapshot fidelity check matched the original image exactly, so scaling/color conversion was not the established cause. The panel's implicit AppKit window animation was disabled in build 155 and retained in build 157.
