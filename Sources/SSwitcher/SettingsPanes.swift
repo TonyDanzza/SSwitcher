@@ -12,13 +12,14 @@ struct SettingsPanes: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var status: SettingsStatus
     @ObservedObject var functionKeys: FunctionKeyController
+    @ObservedObject var displays: DisplayController
     let actions: SettingsActions
 
     var body: some View {
         Group {
             switch tab {
             case .general: general
-            case .permissions: permissions
+            case .displays: displayPane
             case .layout: layout
             case .windows: windows
             case .keyboard: keyboard
@@ -61,13 +62,13 @@ struct SettingsPanes: View {
                 Toggle("Показывать подсказки на экране", isOn: $settings.showNotices)
                 Toggle("Звук, если замена не удалась", isOn: $settings.beepOnFailure)
             } footer: { note("Подсказка появляется на секунду под строкой меню, когда сочетание клавиш меняет режим.") }
+            permissionSection
         }
     }
 
     // MARK: Разрешения
 
-    private var permissions: some View {
-        Form {
+    private var permissionSection: some View {
             Section {
                 permission("Универсальный доступ", "Читать слово у курсора, заменять текст и переносить окна.",
                            granted: status.accessibility, request: actions.requestAccessibility)
@@ -75,8 +76,9 @@ struct SettingsPanes: View {
                            granted: status.inputMonitoring, request: actions.requestInputMonitoring)
                 permission("Запись экрана", "Только для плавной замены: снимок поля на долю секунды. Можно не выдавать.",
                            granted: status.screenCapture, request: actions.requestScreenCapture)
+            } header: {
+                Text("Разрешения macOS")
             } footer: { note("Если SSwitcher нет в списке, добавьте его кнопкой «+» в Системных настройках. После выдачи разрешения macOS может попросить перезапустить программу.") }
-        }
     }
 
     private func permission(_ title: String, _ detail: String, granted: Bool, request: @escaping () -> Void) -> some View {
@@ -254,6 +256,82 @@ struct SettingsPanes: View {
             })
     }
 
+    // MARK: Дисплеи
+
+    private var displayPane: some View {
+        Form {
+            ForEach(displays.displays) { display in
+                Section {
+                    LabeledContent("Разрешение монитора", value: display.nativeWidth > 0 ? "\(display.nativeWidth) × \(display.nativeHeight)" : "неизвестно")
+                    if !display.isBuiltin { hiDPIRow(display) }
+                    sizeRow(display)
+                    if displays.pendingRestart.contains(display.overridePath) {
+                        Text("Перезагрузите Mac, чтобы изменение вступило в силу.").foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text(display.name)
+                }
+            }
+            if let message = displays.lastMessage {
+                Section { Text(message).foregroundStyle(.secondary) }
+            }
+            let managed = displays.displays.filter { !$0.isBuiltin && $0.overrideExists }
+            if !managed.isEmpty {
+                Section {
+                    ForEach(managed) { display in
+                        LabeledContent("Файл-описание «\(display.name)»") {
+                            Button("Удалить…") { displays.removeOverride(for: display) }
+                        }
+                    }
+                } header: {
+                    Text("Дополнительно")
+                } footer: { note("Файл-описание добавляет монитору размеры HiDPI. Удаляйте его, только если HiDPI для этого монитора не нужен совсем: после перезагрузки Mac переключатель HiDPI исчезнет. Копия файла сохраняется, а добавить его снова можно кнопкой «Добавить размеры HiDPI…».") }
+            }
+            Section {
+                EmptyView()
+            } footer: { note("В режиме HiDPI интерфейс рисуется в два раза подробнее и уменьшается до экрана, как на Retina: текст выглядит резче. Это делает сама macOS, поэтому SSwitcher ничего не держит запущенным и не нагружает видеокарту.") }
+        }
+    }
+
+    /// A switch when the monitor offers HiDPI sizes, otherwise the way to add them.
+    @ViewBuilder
+    private func hiDPIRow(_ display: DisplayController.Display) -> some View {
+        if display.hasHiDPI {
+            Toggle(isOn: Binding(
+                get: { display.current?.hiDPI == true },
+                set: { on in on ? displays.makeCrisp(display) : displays.makeNative(display) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("HiDPI")
+                    Text("Текст и интерфейс резче, как на Retina").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } else if display.overrideExists {
+            LabeledContent("HiDPI", value: "появится после перезагрузки Mac")
+        } else {
+            LabeledContent {
+                Button("Добавить размеры HiDPI…") { displays.installOverride(for: display) }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("HiDPI")
+                    Text("macOS не предлагает HiDPI для этого монитора").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// The sizes of the current kind (HiDPI or not) on a slider, smallest
+    /// text on the right, like BetterDisplay's resolution slider.
+    @ViewBuilder
+    private func sizeRow(_ display: DisplayController.Display) -> some View {
+        let hiDPI = display.isBuiltin || display.current?.hiDPI == true
+        let sizes = display.sizes.filter { $0.hiDPI == hiDPI }.sorted { $0.width < $1.width }
+        if sizes.count > 1 {
+            SizeSlider(sizes: sizes, current: display.current) { displays.select($0, on: display) }
+        } else if let current = display.current {
+            LabeledContent("Размер интерфейса") { Text(verbatim: "\(current.width) × \(current.height)") }
+        }
+    }
+
     // MARK: Клавиатура
 
     private var keyboard: some View {
@@ -379,6 +457,46 @@ struct SettingsPanes: View {
                     .frame(height: 220)
                 }
             }
+        }
+    }
+}
+
+/// Steps through sizes while dragging and applies the size on release, so
+/// the display switches once, not at every step.
+private struct SizeSlider: View {
+    let sizes: [DisplayController.Size]
+    let current: DisplayController.Size?
+    let apply: (DisplayController.Size) -> Void
+    @State private var position: Double?
+
+    private var currentIndex: Double {
+        Double(sizes.firstIndex { $0 == current } ?? sizes.firstIndex { $0.width == current?.width } ?? 0)
+    }
+
+    var body: some View {
+        let index = Int((position ?? currentIndex).rounded())
+        let shown = sizes[min(max(index, 0), sizes.count - 1)]
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Размер интерфейса")
+                Spacer()
+                Text(verbatim: "\(shown.width) × \(shown.height)").monospacedDigit().foregroundStyle(.secondary)
+            }
+            Slider(value: Binding(get: { position ?? currentIndex }, set: { position = $0 }),
+                   in: 0...Double(sizes.count - 1), step: 1) {
+                Text("Размер интерфейса")
+            } minimumValueLabel: {
+                Text("Крупнее").font(.caption)
+            } maximumValueLabel: {
+                Text("Больше места").font(.caption)
+            } onEditingChanged: { editing in
+                guard !editing, let position else { return }
+                let chosen = sizes[min(max(Int(position.rounded()), 0), sizes.count - 1)]
+                self.position = nil
+                if chosen != current { apply(chosen) }
+            }
+            .labelsHidden()
+            .accessibilityValue(Text(verbatim: "\(shown.width) × \(shown.height)"))
         }
     }
 }

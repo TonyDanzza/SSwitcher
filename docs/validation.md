@@ -1,4 +1,15 @@
-# Validation — 0.1.26 / build 180
+# Validation — 0.1.27 / build 181
+
+## Displays pane — build 181
+
+On 12 October 2026 the LG HDR QHD (vendor 0x1e6d, product 0x5b96) already had an override from one-key-hidpi (`Icons.plist` beside it) with 35 entries; `system_profiler` showed 5120 × 2880, "looks like" 2560 × 1440 at 75 Hz, with BetterDisplay quit and BetterDisplay's settings listing no virtual screens. The user confirmed the picture stayed sharp without BetterDisplay. A copy of that override is in `~/Library/Application Support/SSwitcher/DisplayOverrides/backup-2026-10-12`.
+
+`CGDisplayVendorNumber`/`CGDisplayModelNumber` returned the same ids as the file name; the mode list read through public CoreGraphics contains the HiDPI sizes. Unit tests compare the generated entries with the working file's bytes (`AAAUAAAAC0AAAAABACAAAA==` for 2560 × 1440).
+
+The user then saw "2560 × 1440, без HiDPI" selected: the LG was at scale 1 (`CGDisplayCopyDisplayMode` 2560 × 1440 px 2560). The crisp 2560 × 1440 existed only in SkyLight's list (modes 76–79, scale 2.0); the public list never had it and build 181 showed it only while it was current. The pane now reads SkyLight's list; for the LG it offers 2560 × 1440 (HiDPI), 2560 × 1440 without HiDPI, and 9 smaller 16:9 HiDPI sizes.
+
+Not checked by the agent: writing or removing an override (system folder, administrator password), applying a size through SkyLight (it changes the user's display), the pane's look.
+
 
 ## Switch rows, trigger key and conflict checks — build 180
 

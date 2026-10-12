@@ -167,3 +167,39 @@ final class SteamShortcutTests: XCTestCase {
         XCTAssertEqual(SteamShortcut.libraryPaths(fromFolders: folders), ["/Users/me/Library/Application Support/Steam", "/Volumes/Games/SteamLibrary"])
     }
 }
+
+final class DisplayOverrideTests: XCTestCase {
+    func testPathMatchesTheWorkingLGOverride() {
+        XCTAssertEqual(DisplayOverride.relativePath(vendor: 0x1e6d, model: 0x5b96), "DisplayVendorID-1e6d/DisplayProductID-5b96")
+    }
+
+    func testSizesRunFromNativeToHalfAtTheAspectRatio() {
+        let sizes = DisplayOverride.scaledSizes(nativeWidth: 2560, nativeHeight: 1440)
+        XCTAssertEqual(sizes.first?.width, 2560)
+        XCTAssertEqual(sizes.first?.height, 1440)
+        XCTAssertEqual(sizes.last?.width, 1280)
+        XCTAssertTrue(sizes.contains { $0 == (1920, 1080) })
+        XCTAssertTrue(sizes.contains { $0 == (1680, 945) })
+        XCTAssertFalse(sizes.contains { $0.width > 2560 || $0.width < 1280 })
+        XCTAssertEqual(DisplayOverride.scaledSizes(nativeWidth: 3440, nativeHeight: 1440).first?.width, 3440)
+        XCTAssertTrue(DisplayOverride.scaledSizes(nativeWidth: 0, nativeHeight: 0).isEmpty)
+    }
+
+    func testEntriesEncodeLikeOneKeyHiDPI() throws {
+        // The user's file: 2560x1440 looks-like as 5120x2880 with flags 1 and 1, 0x200000.
+        XCTAssertEqual(DisplayOverride.entry(width: 2560, height: 1440, flags: [0x1]),
+                       Data([0, 0, 0x14, 0, 0, 0, 0x0b, 0x40, 0, 0, 0, 1]))
+        XCTAssertEqual(Data(base64Encoded: "AAAUAAAAC0AAAAABACAAAA=="),
+                       DisplayOverride.entry(width: 2560, height: 1440, flags: [0x1, 0x200000]))
+        let plist = try DisplayOverride.plist(vendor: 0x1e6d, model: 0x5b96, sizes: [(2560, 1440), (1920, 1080)])
+        let value = try XCTUnwrap(PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any])
+        XCTAssertEqual(value["DisplayVendorID"] as? Int, 7789)
+        XCTAssertEqual(value["DisplayProductID"] as? Int, 23446)
+        XCTAssertEqual((value["scale-resolutions"] as? [Data])?.count, 4)
+        XCTAssertEqual(DisplayOverride.backingSizes(in: plist).map(\.width), [5120, 3840])
+    }
+
+    func testShellQuoting() {
+        XCTAssertEqual(DisplayOverride.shellQuoted("/a b/it's"), "'/a b/it'\\''s'")
+    }
+}

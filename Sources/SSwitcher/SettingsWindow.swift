@@ -4,14 +4,14 @@ import SwiftUI
 import SwitcherCore
 
 enum SettingsTab: Int, CaseIterable {
-    case general, permissions, layout, windows, keyboard, keepAwake, check
+    case general, layout, windows, displays, keyboard, keepAwake, check
 
     var title: String {
         switch self {
         case .general: return "Основные"
-        case .permissions: return "Разрешения"
         case .layout: return "Раскладка"
         case .windows: return "Окна"
+        case .displays: return "Дисплеи"
         case .keyboard: return "Клавиатура"
         case .keepAwake: return "Не засыпать"
         case .check: return "Проверка"
@@ -21,9 +21,9 @@ enum SettingsTab: Int, CaseIterable {
     var symbol: String {
         switch self {
         case .general: return "gearshape"
-        case .permissions: return "lock.shield"
         case .layout: return "character.cursor.ibeam"
         case .windows: return "macwindow.on.rectangle"
+        case .displays: return "display"
         case .keyboard: return "keyboard"
         case .keepAwake: return "cup.and.saucer"
         case .check: return "stethoscope"
@@ -100,7 +100,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let tabs = SettingsTabsController()
     private static let tabKey = "settingsTab"
 
-    init(settings: AppSettings, status: SettingsStatus, functionKeys: FunctionKeyController, actions: SettingsActions) {
+    init(settings: AppSettings, status: SettingsStatus, functionKeys: FunctionKeyController, displays: DisplayController,
+         actions: SettingsActions) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SettingsPanes.width, height: SettingsPanes.height),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -112,7 +113,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Settings: resizing the window per pane made the content jump.
         tabs.transitionOptions = []
         for tab in SettingsTab.allCases {
-            let pane = SettingsPanes(tab: tab, settings: settings, status: status, functionKeys: functionKeys, actions: actions)
+            let pane = SettingsPanes(tab: tab, settings: settings, status: status, functionKeys: functionKeys,
+                                     displays: displays, actions: actions)
             let host = NSHostingController(rootView: pane)
             host.title = tab.title
             host.sizingOptions = []

@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let windowHotKeys = WindowMoveHotKeys()
     private let functionKeys = FunctionKeyController()
     private let keepAwake = KeepAwakeController()
+    private let displayController = DisplayController()
     private let nativeServices = NativeServiceProvider()
     private lazy var maxRouter = MaxConversionRouter(monitor: monitor, services: nativeServices)
     private let settings = AppSettings.shared
@@ -84,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.nativeServices.cancelVisualShield()
             self?.refreshWindowShortcuts()
             self?.refreshSettingsStatus()
+            if self?.settingsWindow?.isVisible == true { self?.displayController.refresh() }
         }
         monitor.onUserActivity = { [weak self] in
             guard let overlay = self?.editor.overlay, !overlay.isIdle else { return }
@@ -317,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menuProblems: [(String, SettingsTab)] {
         var problems: [(String, SettingsTab)] = []
         if (enabled || windowMovementEnabled) && (!monitor.isRunning || !AXIsProcessTrusted()) {
-            problems.append(("Нужны разрешения macOS…", .permissions))
+            problems.append(("Нужны разрешения macOS…", .general))
         }
         if windowMovementEnabled, windowHotKeys.lastError != nil, !windowHotKeys.isRegistered, displayCount >= 2,
            AXIsProcessTrusted(), monitor.isRunning {
@@ -413,11 +415,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                   conflicts: ShortcutChecks.conflicts(forArrows: modifiers, directions: directions),
                                                   in: self.settingsWindow?.window)
                 })
-            let window = SettingsWindowController(settings: settings, status: settingsStatus, functionKeys: functionKeys, actions: actions)
+            let window = SettingsWindowController(settings: settings, status: settingsStatus, functionKeys: functionKeys,
+                                                  displays: displayController, actions: actions)
             window.onVisibilityChange = { [weak self] visible in self?.settingsVisibilityChanged(visible) }
             settingsWindow = window
         }
         refreshSettingsStatus()
+        displayController.refresh()
         settingsWindow?.show(tab)
     }
 
