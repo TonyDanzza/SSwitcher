@@ -78,17 +78,6 @@ final class FunctionKeyController: NSObject, ObservableObject {
         onChange?()
     }
 
-    func menuItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "F1–F12 без fn", action: #selector(toggleBase), keyEquivalent: "")
-        item.target = self
-        item.state = policy.base == .standard ? .on : .off
-        if let shortcut = hotKey.shortcut, hotKey.isRegistered { AppIdentity.show(shortcut, on: item) }
-        item.toolTip = "Включено: F1–F12 работают сами, яркость и звук — с fn. Выключено: наоборот"
-        return item
-    }
-
-    @objc private func toggleBase() { setBase(Self.preference.toggled) }
-
     private func setBase(_ mode: FunctionKeyMode) {
         policy.base = mode
         if Self.setPreference(mode) { frontmostChanged() }

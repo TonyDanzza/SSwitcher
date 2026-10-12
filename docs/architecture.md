@@ -81,6 +81,10 @@ The original focused window, owner and display snapshot are revalidated before e
 
 The window is an AppKit `NSTabViewController` in toolbar style; each pane is a SwiftUI grouped `Form` in an `NSHostingController` with a fixed height. While it is visible the app switches to the regular activation policy (Dock, Command-Tab, a main menu with Edit commands) and a one-second timer refreshes `SettingsStatus` (permissions, displays, registration problems, results); closing returns to the accessory policy. While a shortcut field records, SSwitcher's own Carbon shortcuts are unregistered so the current combination can be recorded. `KeyShortcut` (SwitcherCore) rejects shortcuts without ⌃, ⌥ or ⌘ (except F13–F20) and reserved system combinations.
 
+The double tap uses `TriggerKey` (Shift, Control, Option or Command) and `TriggerSide`; the detector and the monitor's drain and cancellation rules use that key pair instead of the Shift codes 56/60. Before a shortcut, the window modifiers or the trigger change, `ShortcutChecks` collects conflicts: `ShortcutConflicts` compares with `AppleSymbolicHotKeys` (stored entries override built-in defaults; the Fn flag on function keys is ignored; "modifier" entries are double taps such as Dictation), standard application commands, text-editing meanings of modifier+arrow, and an exclusive Carbon probe for other running programs; running Raycast, Alfred or AltTab are named for non-Shift double taps. The user confirms in an alert.
+
+The status menu's first three rows are `MenuSwitchRow` views (title, second line with hairline separators, `NSSwitch`); toggling updates them in place, so the open menu is never rebuilt.
+
 Window shortcut directions are `WindowShortcutDirections.available(in:)` by default: a direction is registered when some display has another beyond its facing edge, the same edge test the transfer plan uses. Manual mode registers the chosen arrows; nothing registers with one display.
 
 ## Top-row mode

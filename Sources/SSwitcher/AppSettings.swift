@@ -1,17 +1,6 @@
 import AppKit
 import SwitcherCore
 
-enum DoubleShiftKeys: Int, CaseIterable {
-    case any, left, right
-    var keys: Set<UInt16> {
-        switch self {
-        case .any: return [56, 60]
-        case .left: return [56]
-        case .right: return [60]
-        }
-    }
-}
-
 /// Every user choice, stored in UserDefaults. Keys from earlier builds keep
 /// their names and meaning, so an update changes nothing. Views bind to the
 /// published values; `onChange` lets the app apply them.
@@ -24,7 +13,9 @@ final class AppSettings: ObservableObject {
     // Double Shift
     @Published var conversionEnabled: Bool { didSet { save(!conversionEnabled, "paused") } }
     @Published var smoothReplacement: Bool { didSet { save(!smoothReplacement, "disableSmoothReplacement") } }
-    @Published var doubleShiftKeys: DoubleShiftKeys { didSet { save(doubleShiftKeys.rawValue, "doubleShiftKeys") } }
+    @Published var triggerKey: TriggerKey { didSet { save(triggerKey.rawValue, "doubleTapKey") } }
+    /// Stored under the build 179 key, when only Shift could be chosen.
+    @Published var triggerSide: TriggerSide { didSet { save(triggerSide.rawValue, "doubleShiftKeys") } }
     @Published var doubleShiftInterval: Double { didSet { save(doubleShiftInterval, "doubleShiftInterval") } }
     @Published var excludedApplications: [String] { didSet { save(excludedApplications, "conversionExcludedApplications") } }
     @Published var beepOnFailure: Bool { didSet { save(!beepOnFailure, "beepOnFailureDisabled") } }
@@ -57,7 +48,8 @@ final class AppSettings: ObservableObject {
         let d = UserDefaults.standard
         conversionEnabled = !d.bool(forKey: "paused")
         smoothReplacement = !d.bool(forKey: "disableSmoothReplacement")
-        doubleShiftKeys = DoubleShiftKeys(rawValue: d.integer(forKey: "doubleShiftKeys")) ?? .any
+        triggerKey = TriggerKey(rawValue: d.integer(forKey: "doubleTapKey")) ?? .shift
+        triggerSide = TriggerSide(rawValue: d.integer(forKey: "doubleShiftKeys")) ?? .any
         let interval = d.double(forKey: "doubleShiftInterval")
         doubleShiftInterval = Self.intervalRange.contains(interval) ? interval : 0.3
         excludedApplications = d.stringArray(forKey: "conversionExcludedApplications") ?? []
@@ -79,6 +71,9 @@ final class AppSettings: ObservableObject {
         keepAwakeShortcut = KeyShortcut(storage: d.dictionary(forKey: "keepAwakeShortcut"))
         keepAwakeShortcutMinutes = d.object(forKey: "keepAwakeShortcutMinutes") as? Int ?? 60
     }
+
+    /// "Двойной Shift", "Двойной левый ⌥".
+    var triggerPhrase: String { triggerSide.phrase(triggerKey) }
 
     func isExcluded(_ app: NSRunningApplication?) -> Bool {
         guard let id = app?.bundleIdentifier else { return false }

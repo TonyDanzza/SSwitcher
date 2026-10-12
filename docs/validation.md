@@ -1,4 +1,17 @@
-# Validation — 0.1.25 / build 179
+# Validation — 0.1.26 / build 180
+
+## Switch rows, trigger key and conflict checks — build 180
+
+On 12 October 2026, `swift test`: **268 tests, zero failures** (new: parsing `AppleSymbolicHotKeys` with the Fn flag and disabled entries, fixed and application shortcuts, Dictation-style double taps, modifier+arrow meanings, an Option double tap ignoring Shift).
+
+Adding applications: the user reported that "Dota 2" from Applications was not added. It is a Steam shortcut (`run.sh` → `open steam://run/570`) without a bundle identifier. Build 180 follows the app id through `libraryfolders.vdf` and `appmanifest_570.acf` to `steamapps/common/dota 2 beta` and the first bundle with an identifier: on this Mac `com.valvesoftware.dota2` in 0.09 s (also `gg.leyline.Ember` for the Guildrun Demo shortcut). Other bundles without an identifier now show an explanation instead of doing nothing.
+
+The menu toggles are drawn by SSwitcher (`MenuToggle`): a menu is never the key window, so `NSSwitch` drew "on" in inactive gray (user's screenshot). The Fn switch was inverted to the user's meaning: on = brightness and sound without fn.
+
+Settings panes now share one size (600×620 measured on all seven tabs) with no transition; per-pane heights made the window jump when switching tabs.
+
+The three switch rows were rendered off screen: title, second line, a 1 pt rule before ⌃⌥⌘F, the switch on the right. The installed build's open menu could not be captured: the screen was locked (loginwindow above all windows). Not checked by the agent: the rows inside the real menu, toggling from the menu, the conflict alerts, a non-Shift double tap by hand.
+
 
 ## Settings window and short menu — build 179
 

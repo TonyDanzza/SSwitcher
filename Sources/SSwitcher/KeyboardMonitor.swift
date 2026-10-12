@@ -26,10 +26,17 @@ final class KeyboardMonitor {
     private(set) var syntheticEventCount = 0
     private var detector = DoubleShiftDetector()
 
-    /// Settings: which Shift counts and how fast both taps must be. Main thread,
-    /// like the tap itself; a change drops any half-finished pair.
-    func configureDoubleShift(keys: Set<UInt16>, interval: Double) {
-        guard detector.keys != keys || detector.interval != interval else { return }
+    /// Both keys of the trigger modifier (Shift unless Settings say otherwise).
+    private var triggerKeys = TriggerKey.shift.codes
+
+    /// Settings: the trigger modifier, which of its keys count and how fast
+    /// both taps must be. Main thread, like the tap; a change drops any
+    /// half-finished pair.
+    func configureDoubleTap(trigger: TriggerKey, side: TriggerSide, interval: Double) {
+        let keys = side.keys(of: trigger)
+        guard triggerKeys != trigger.codes || detector.keys != keys || detector.interval != interval else { return }
+        triggerKeys = trigger.codes
+        detector.pair = trigger.codes
         detector.keys = keys
         detector.interval = interval
         detector.reset()
@@ -202,9 +209,9 @@ final class KeyboardMonitor {
         // The listening tap does only local bookkeeping/invalidation; the
         // callback dispatches AppKit work only when something is on screen.
         onUserActivity?()
-        // A second double Shift is drained during the existing replacement.
+        // A second double tap is drained during the existing replacement.
         // Actual typing, clicks and other modifiers still cancel that attempt.
-        if type != .flagsChanged || (key != 56 && key != 60) {
+        if type != .flagsChanged || !triggerKeys.contains(key) {
             inputGeneration &+= 1
             burst.realInput()
             pendingDispatch?.cancel()
@@ -213,16 +220,17 @@ final class KeyboardMonitor {
         }
         guard type == .flagsChanged else { detector.cancelGesture(); return }
         if let flag = Self.modifierFlags[key] { modifiers.changed(key: key, groupDown: event.flags.contains(flag)) }
-        let shiftDown = modifiers.shiftHeld || Self.hardwareKeyDown(56) || Self.hardwareKeyDown(60)
-        if key == 56 || key == 60 {
+        let triggers = triggerKeys
+        let shiftDown = modifiers.holds(any: triggers) || triggers.contains(where: Self.hardwareKeyDown)
+        if triggers.contains(key) {
             shiftEventCount += 1
             burst.shiftChanged(down: shiftDown, at: ProcessInfo.processInfo.systemUptime)
             pendingDispatch?.cancel()
         }
         if detector.shiftChanged(
             key: key, anyShiftDown: shiftDown,
-            otherModifierDown: modifiers.otherModifierHeld ||
-                PhysicalModifierState.unsafeKeys.contains { $0 != 56 && $0 != 60 && Self.hardwareKeyDown($0) },
+            otherModifierDown: modifiers.holdsOther(than: triggers) ||
+                PhysicalModifierState.unsafeKeys.contains { !triggers.contains($0) && Self.hardwareKeyDown($0) },
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             doubleShiftCount += 1

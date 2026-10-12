@@ -12,6 +12,8 @@ final class ShortcutRecorderView: NSView {
     var onRecordingChange: ((Bool) -> Void)?
     /// Extra checks, such as a clash with another SSwitcher shortcut.
     var validate: ((KeyShortcut) -> String?)?
+    /// Asks before taking a combination something else uses; false keeps the old one.
+    var confirm: ((KeyShortcut) -> Bool)?
 
     private var isRecording = false {
         didSet {
@@ -105,6 +107,10 @@ final class ShortcutRecorderView: NSView {
             refresh()
             return
         }
+        if candidate != shortcut, let confirm, !confirm(candidate) {
+            window?.makeFirstResponder(nil)
+            return
+        }
         shortcut = candidate
         onChange?(candidate)
         window?.makeFirstResponder(nil)
@@ -153,6 +159,7 @@ struct ShortcutField: NSViewRepresentable {
     @Binding var shortcut: KeyShortcut?
     var allowsEmpty = true
     var validate: ((KeyShortcut) -> String?)?
+    var confirm: ((KeyShortcut) -> Bool)?
     var onRecordingChange: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> ShortcutRecorderView {
@@ -168,6 +175,7 @@ struct ShortcutField: NSViewRepresentable {
         if view.shortcut != shortcut { view.shortcut = shortcut }
         view.allowsEmpty = allowsEmpty
         view.validate = validate
+        view.confirm = confirm
         view.onChange = { shortcut = $0 }
         view.onRecordingChange = onRecordingChange
     }

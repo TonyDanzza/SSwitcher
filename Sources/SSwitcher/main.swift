@@ -19,11 +19,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsWindow: SettingsWindowController?
     private var settingsTimer: Timer?
     private var isRecordingShortcut = false
+    private lazy var layoutRow = MenuSwitchRow(title: "Раскладка")
+    private lazy var windowsRow = MenuSwitchRow(title: "Перенос окон")
+    private lazy var functionRow = MenuSwitchRow(title: "Fn")
     private var appliedConversionEnabled = AppSettings.shared.conversionEnabled
     private var windowMovementEnabled: Bool { settings.windowMovementEnabled }
     private var enabled: Bool { settings.conversionEnabled }
-    private var lastAttempt = "Ещё не срабатывал"
-    private var lastResult = "Ожидание двойного Shift"
+    private var lastAttempt = "Ещё не было"
+    private var lastResult = "Ещё не срабатывало"
     private var activationObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
     private var inputSourceObserver: NSObjectProtocol?
@@ -37,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image = BrandIcon.menuImage()
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.setAccessibilityLabel("SSwitcher — исправление раскладки")
-        statusItem.button?.toolTip = "SSwitcher — двойной Shift исправляет раскладку текста"
+        statusItem.button?.toolTip = "SSwitcher — \(AppSettings.shared.triggerPhrase.lowercased()) исправляет раскладку текста"
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -270,6 +273,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         guard let menu = statusItem.menu else { return }
         menu.removeAllItems()
+        // Switches replace checkmarks, so the checkmark column would only
+        // push ordinary items away from the switch rows' text.
+        menu.showsStateColumn = false
         let problems = menuProblems
         for (title, tab) in problems {
             let item = add(title, action: #selector(openSettingsTab(_:)), to: menu)
@@ -277,23 +283,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "Внимание")
         }
         if !problems.isEmpty { menu.addItem(.separator()) }
-        let toggle = add("Исправлять по двойному Shift", action: #selector(toggleEnabled), to: menu)
-        toggle.state = enabled ? .on : .off
-        let registered = windowHotKeys.isRegistered ? windowHotKeys.directions : []
-        let title = registered.isEmpty ? "Переносить окна"
-            : "Переносить окна: \(windowHotKeys.modifiers.symbols)\(WindowShortcutDirections.arrows(registered))"
-        let windows = add(title, action: #selector(toggleWindowMovement), to: menu)
-        windows.state = windowMovementEnabled ? .on : .off
-        if let reason = windowShortcutWaitingReason {
-            if #available(macOS 14.4, *) { windows.subtitle = reason } else { windows.toolTip = reason }
-        }
-        menu.addItem(functionKeys.menuItem())
+        updateMenuRows()
+        for row in [layoutRow, windowsRow, functionRow] { menu.addItem(row.item) }
         for item in keepAwake.menuItems() { menu.addItem(item) }
         menu.addItem(.separator())
         let settingsItem = add("Настройки…", action: #selector(showSettings), to: menu)
         settingsItem.keyEquivalent = ","
         let quit = add("Завершить SSwitcher", action: #selector(quit), to: menu)
         quit.keyEquivalent = "q"
+    }
+
+    /// Switch rows: the second line says what the switch does right now.
+    private func updateMenuRows() {
+        layoutRow.onToggle = { [weak self] on in self?.settings.conversionEnabled = on }
+        layoutRow.update(isOn: enabled, details: ["\(settings.triggerPhrase) исправляет текст"])
+        windowsRow.onToggle = { [weak self] on in self?.settings.windowMovementEnabled = on }
+        let registered = windowHotKeys.isRegistered ? windowHotKeys.directions : []
+        let windowDetail = windowShortcutWaitingReason
+            ?? (registered.isEmpty ? "Между дисплеями" : "\(windowHotKeys.modifiers.symbols)\(WindowShortcutDirections.arrows(registered)) переносит окно")
+        windowsRow.update(isOn: windowMovementEnabled, details: [windowDetail])
+        // "Fn on" means the fn layer is in effect without holding fn:
+        // brightness and sound (the macOS default). Off: plain F1–F12.
+        functionRow.onToggle = { [weak self] on in
+            self?.functionKeys.baseMode = on ? .media : .standard
+            self?.updateMenuRows()
+        }
+        var functionDetails = [functionKeys.baseMode == .media ? "Яркость и звук без fn" : "F1–F12 без fn, яркость с fn"]
+        if let shortcut = functionKeys.shortcut, !functionKeys.isShortcutBlocked { functionDetails.append(KeyNames.string(shortcut)) }
+        functionRow.update(isOn: functionKeys.baseMode == .media, details: functionDetails)
     }
 
     /// One line per problem; each opens the Settings pane that fixes it.
@@ -324,11 +341,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    @objc private func toggleEnabled() { settings.conversionEnabled.toggle() }
-    @objc private func toggleWindowMovement() { settings.windowMovementEnabled.toggle() }
 
     private func applyDoubleShiftSettings() {
-        monitor.configureDoubleShift(keys: settings.doubleShiftKeys.keys, interval: settings.doubleShiftInterval)
+        monitor.configureDoubleTap(trigger: settings.triggerKey, side: settings.triggerSide, interval: settings.doubleShiftInterval)
     }
 
     /// Applies any Settings change: listener, shortcuts, typed-word tracking.
@@ -346,7 +361,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTypedWordTracking()
         refreshPermissions()
         refreshSettingsStatus()
-        rebuildMenu()
+        // An open menu keeps its rows; only their text and switches change.
+        updateMenuRows()
     }
 
     // MARK: Settings window
@@ -379,7 +395,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 openTestWindow: { [weak self] in self?.presentDiagnostics(activateApplication: true) },
                 copyReport: { [weak self] in self?.copyReport() },
                 stopKeepAwake: { [weak self] in self?.keepAwake.stop() },
-                recordingShortcut: { [weak self] recording in self?.recordingShortcut(recording) })
+                recordingShortcut: { [weak self] recording in self?.recordingShortcut(recording) },
+                confirmShortcut: { [weak self] shortcut in
+                    ShortcutChecks.confirm("Сочетание \(KeyNames.string(shortcut))", conflicts: ShortcutChecks.conflicts(for: shortcut),
+                                           in: self?.settingsWindow?.window)
+                },
+                confirmTrigger: { [weak self] trigger in
+                    ShortcutChecks.confirm("Двойное нажатие \(trigger.symbol)", conflicts: ShortcutChecks.conflicts(forDoubleTap: trigger),
+                                           in: self?.settingsWindow?.window)
+                },
+                confirmWindowModifiers: { [weak self] modifiers in
+                    guard let self else { return true }
+                    let available = WindowShortcutDirections.available(in: WindowMoveController.currentDisplays())
+                    let directions = self.settings.windowDirectionsManual ? self.settings.windowDirections
+                        : (available.isEmpty ? Set(WindowMoveDirection.allCases) : available)
+                    return ShortcutChecks.confirm("Сочетание \(modifiers.symbols) + стрелки",
+                                                  conflicts: ShortcutChecks.conflicts(forArrows: modifiers, directions: directions),
+                                                  in: self.settingsWindow?.window)
+                })
             let window = SettingsWindowController(settings: settings, status: settingsStatus, functionKeys: functionKeys, actions: actions)
             window.onVisibilityChange = { [weak self] visible in self?.settingsVisibilityChanged(visible) }
             settingsWindow = window

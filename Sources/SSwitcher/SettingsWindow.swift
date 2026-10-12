@@ -29,19 +29,6 @@ enum SettingsTab: Int, CaseIterable {
         case .check: return "stethoscope"
         }
     }
-
-    /// Fixed pane heights keep the window from jumping while values change.
-    var height: CGFloat {
-        switch self {
-        case .general: return 230
-        case .permissions: return 290
-        case .layout: return 520
-        case .windows: return 560
-        case .keyboard: return 420
-        case .keepAwake: return 450
-        case .check: return 470
-        }
-    }
 }
 
 /// What the panes show but do not own: permissions, displays, results.
@@ -89,6 +76,10 @@ struct SettingsActions {
     /// While a shortcut field records, SSwitcher's own shortcuts are removed
     /// so pressing the current combination records it instead of acting.
     var recordingShortcut: (Bool) -> Void
+    /// Each returns true when nothing else uses the choice or the user takes it anyway.
+    var confirmShortcut: (KeyShortcut) -> Bool
+    var confirmTrigger: (TriggerKey) -> Bool
+    var confirmWindowModifiers: (KeyShortcut.Modifiers) -> Bool
 }
 
 private final class SettingsTabsController: NSTabViewController {
@@ -110,19 +101,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private static let tabKey = "settingsTab"
 
     init(settings: AppSettings, status: SettingsStatus, functionKeys: FunctionKeyController, actions: SettingsActions) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SettingsPanes.width, height: 400),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SettingsPanes.width, height: SettingsPanes.height),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.toolbarStyle = .preference
         super.init(window: window)
         window.delegate = self
         tabs.tabStyle = .toolbar
-        tabs.transitionOptions = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? [] : [.crossfade, .allowUserInteraction]
+        // One size for every pane and an instant switch, as in System
+        // Settings: resizing the window per pane made the content jump.
+        tabs.transitionOptions = []
         for tab in SettingsTab.allCases {
             let pane = SettingsPanes(tab: tab, settings: settings, status: status, functionKeys: functionKeys, actions: actions)
             let host = NSHostingController(rootView: pane)
             host.title = tab.title
-            host.preferredContentSize = NSSize(width: SettingsPanes.width, height: tab.height)
+            host.sizingOptions = []
+            host.preferredContentSize = NSSize(width: SettingsPanes.width, height: SettingsPanes.height)
             let item = NSTabViewItem(viewController: host)
             item.label = tab.title
             item.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: tab.title)
@@ -133,7 +127,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let saved = SettingsTab(rawValue: UserDefaults.standard.integer(forKey: Self.tabKey)) ?? .general
         tabs.selectedTabViewItemIndex = saved.rawValue
         window.title = saved.title
-        window.setFrameAutosaveName("SSwitcherSettings")
+        window.setFrameAutosaveName("SSwitcherSettingsWindow")
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

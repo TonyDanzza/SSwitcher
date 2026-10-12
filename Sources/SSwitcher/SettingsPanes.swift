@@ -6,6 +6,8 @@ import SwitcherCore
 /// controls on the right, one short explanation under a group.
 struct SettingsPanes: View {
     static let width: CGFloat = 600
+    /// Every pane shares the window size; a longer pane scrolls.
+    static let height: CGFloat = 540
     let tab: SettingsTab
     @ObservedObject var settings: AppSettings
     @ObservedObject var status: SettingsStatus
@@ -26,7 +28,7 @@ struct SettingsPanes: View {
         }
         .formStyle(.grouped)
         .toggleStyle(.switch)
-        .frame(width: Self.width, height: tab.height)
+        .frame(width: Self.width, height: Self.height)
     }
 
     /// Group explanations read left to right and wrap, as in System Settings.
@@ -69,7 +71,7 @@ struct SettingsPanes: View {
             Section {
                 permission("Универсальный доступ", "Читать слово у курсора, заменять текст и переносить окна.",
                            granted: status.accessibility, request: actions.requestAccessibility)
-                permission("Мониторинг ввода", "Замечать двойной Shift. Текст не сохраняется и никуда не отправляется.",
+                permission("Мониторинг ввода", "Замечать двойное нажатие клавиши. Текст не сохраняется и никуда не отправляется.",
                            granted: status.inputMonitoring, request: actions.requestInputMonitoring)
                 permission("Запись экрана", "Только для плавной замены: снимок поля на долю секунды. Можно не выдавать.",
                            granted: status.screenCapture, request: actions.requestScreenCapture)
@@ -103,15 +105,25 @@ struct SettingsPanes: View {
             Section {
                 Toggle(isOn: $settings.conversionEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Исправлять по двойному Shift")
-                        Text("Выделенный текст или слово, если курсор стоит сразу после него.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Исправлять раскладку текста")
+                        Text("Набрали «ghbdtn» вместо «привет»? Дважды нажмите клавишу, и текст станет правильным: выделенный или слово перед курсором.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Picker("Какой Shift", selection: $settings.doubleShiftKeys) {
-                    Text("Любой").tag(DoubleShiftKeys.any)
-                    Text("Левый").tag(DoubleShiftKeys.left)
-                    Text("Правый").tag(DoubleShiftKeys.right)
+                Picker("Клавиша", selection: Binding(
+                    get: { settings.triggerKey },
+                    set: { trigger in
+                        guard trigger != settings.triggerKey, actions.confirmTrigger(trigger) else { return }
+                        settings.triggerKey = trigger
+                    })) {
+                    ForEach(TriggerKey.allCases, id: \.rawValue) { Text("\($0.symbol) \($0.name)").tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!settings.conversionEnabled)
+                Picker("Какая из двух", selection: $settings.triggerSide) {
+                    Text("Любая").tag(TriggerSide.any)
+                    Text("Левая").tag(TriggerSide.left)
+                    Text("Правая").tag(TriggerSide.right)
                 }
                 .pickerStyle(.segmented)
                 .disabled(!settings.conversionEnabled)
@@ -127,7 +139,7 @@ struct SettingsPanes: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .disabled(!settings.conversionEnabled)
-            }
+            } footer: { note("Сейчас: \(settings.triggerPhrase.lowercased()). Перед сменой клавиши SSwitcher проверит, не занято ли её двойное нажатие в macOS или запущенных программах.") }
             Section {
                 Toggle("Плавная замена", isOn: $settings.smoothReplacement)
                 if settings.smoothReplacement && !status.screenCapture {
@@ -145,7 +157,7 @@ struct SettingsPanes: View {
                 }
             } header: {
                 Text("Не исправлять в программах")
-            } footer: { note("В этих программах двойной Shift ничего не делает. Подходит для игр, терминала и удалённого рабочего стола.") }
+            } footer: { note("В этих программах \(settings.triggerPhrase.lowercased()) ничего не делает. Подходит для игр, терминала и удалённого рабочего стола.") }
         }
     }
 
@@ -221,13 +233,24 @@ struct SettingsPanes: View {
         return "Работают \(mods)\(WindowShortcutDirections.arrows(active)).\(freeText)"
     }
 
+    /// Another SSwitcher shortcut, including window arrows, cannot be shared.
+    private func ownConflict(_ shortcut: KeyShortcut, besides other: KeyShortcut?, _ name: String) -> String? {
+        if shortcut == other { return "Занято \(name)" }
+        let arrows: Set<UInt32> = [123, 124, 125, 126]
+        if settings.windowMovementEnabled, arrows.contains(shortcut.keyCode), shortcut.modifiers == settings.windowModifiers {
+            return "Занято переносом окон"
+        }
+        return nil
+    }
+
     private func modifierBinding(_ modifier: KeyShortcut.Modifiers) -> Binding<Bool> {
         Binding(
             get: { settings.windowModifiers.contains(modifier) },
             set: { on in
                 var value = settings.windowModifiers
                 if on { value.insert(modifier) } else { value.remove(modifier) }
-                if value.hasShortcutModifier { settings.windowModifiers = value } else { NSSound.beep() }
+                guard value.hasShortcutModifier else { NSSound.beep(); return }
+                if actions.confirmWindowModifiers(value) { settings.windowModifiers = value }
             })
     }
 
@@ -245,7 +268,8 @@ struct SettingsPanes: View {
                     Text("Переключать сочетанием")
                     Spacer()
                     ShortcutField(shortcut: $settings.functionKeyShortcut,
-                                  validate: { $0 == settings.keepAwakeShortcut ? "Занято «Не засыпать»" : nil },
+                                  validate: { ownConflict($0, besides: settings.keepAwakeShortcut, "«Не засыпать»") },
+                                  confirm: actions.confirmShortcut,
                                   onRecordingChange: actions.recordingShortcut)
                         .frame(width: 160, height: 24)
                 }
@@ -297,7 +321,8 @@ struct SettingsPanes: View {
                     Text("Включать и выключать сочетанием")
                     Spacer()
                     ShortcutField(shortcut: $settings.keepAwakeShortcut,
-                                  validate: { $0 == settings.functionKeyShortcut ? "Занято верхним рядом" : nil },
+                                  validate: { ownConflict($0, besides: settings.functionKeyShortcut, "верхним рядом") },
+                                  confirm: actions.confirmShortcut,
                                   onRecordingChange: actions.recordingShortcut)
                         .frame(width: 160, height: 24)
                 }
@@ -333,7 +358,7 @@ struct SettingsPanes: View {
     private var check: some View {
         Form {
             Section {
-                LabeledContent("Последний двойной Shift", value: status.lastAttempt)
+                LabeledContent("Последнее срабатывание", value: status.lastAttempt)
                 LabeledContent("Результат") {
                     Text(status.lastResult).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
                 }
@@ -342,7 +367,7 @@ struct SettingsPanes: View {
                     Spacer()
                     Button("Скопировать отчёт", action: actions.copyReport)
                 }
-            } footer: { note("В тестовом окне поставьте курсор после ghbdtn и дважды нажмите Shift: должно получиться «привет». Отчёт не содержит набранного текста.") }
+            } footer: { note("В тестовом окне поставьте курсор после ghbdtn и дважды нажмите \(settings.triggerKey.name): должно получиться «привет». Отчёт не содержит набранного текста.") }
             Section {
                 DisclosureGroup("Подробности") {
                     ScrollView {
