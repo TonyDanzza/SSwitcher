@@ -47,9 +47,8 @@ final class MenuSwitchRow: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// `details` parts are separated by thin vertical rules.
-    func update(isOn: Bool, details parts: [String], enabled: Bool = true) {
+    func update(isOn: Bool, details parts: [String]) {
         toggle.isOn = isOn
-        toggle.isEnabled = enabled
         details.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for (index, part) in parts.enumerated() {
             if index > 0 { details.addArrangedSubview(Self.rule()) }
@@ -82,7 +81,6 @@ final class MenuSwitchRow: NSView {
     }
 
     private func flip() {
-        guard toggle.isEnabled else { return }
         toggle.isOn.toggle()
         onToggle?(toggle.isOn)
     }
@@ -97,7 +95,6 @@ final class MenuToggle: NSView {
     static let size = NSSize(width: 28, height: 16)
     var onPress: (() -> Void)?
     var isOn = false { didSet { if isOn != oldValue { needsDisplay = true; moveKnob() } } }
-    var isEnabled = true { didSet { needsDisplay = true } }
     private let knob = CALayer()
 
     override init(frame: NSRect) {
@@ -120,7 +117,7 @@ final class MenuToggle: NSView {
     override func updateLayer() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let track = isOn ? NSColor.controlAccentColor : NSColor.labelColor.withAlphaComponent(0.15)
-            layer?.backgroundColor = (isEnabled ? track : track.withAlphaComponent(0.3)).cgColor
+            layer?.backgroundColor = track.cgColor
             layer?.borderWidth = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 1 : 0
             layer?.borderColor = NSColor.separatorColor.cgColor
         }

@@ -83,9 +83,7 @@ public enum ShortcutConflicts {
     /// text-editing meaning in ordinary editors.
     public static func arrowConflict(_ modifiers: KeyShortcut.Modifiers, _ direction: WindowMoveDirection,
                                      stored: [SystemShortcut]) -> String? {
-        let code: UInt32
-        switch direction { case .left: code = 123; case .right: code = 124; case .down: code = 125; case .up: code = 126 }
-        if let system = systemConflict(KeyShortcut(keyCode: code, modifiers: modifiers), stored: stored) { return system }
+        if let system = systemConflict(KeyShortcut(keyCode: direction.keyCode, modifiers: modifiers), stored: stored) { return system }
         let horizontal = direction == .left || direction == .right
         switch modifiers {
         case [.option]: return horizontal ? "переход по словам в тексте" : "переход по абзацам в тексте"

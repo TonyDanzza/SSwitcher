@@ -41,11 +41,11 @@ final class NativeServiceProvider: NSObject {
         // A two-way declaration keeps MAX active. Never leave the sent text
         // as a return value: Qt could insert it again and collapse selection.
         // Clear formats, not an empty string (which would delete selection).
-        if selectionProof.receiveWordPacket(pasteboard) {
-            // A successful read is not a failed service. Returning an error
-            // can interrupt the requestor's queued Services/navigation.
-            // No return formats means Qt has no text to commit.
-            if NativeServicePacket.discardReturnValue(pasteboard) { error.pointee = nil }
+        // A successful read is not a failed service. Returning an error can
+        // interrupt the requestor's queued Services/navigation. The deferred
+        // discard leaves no return formats, so Qt has no text to commit.
+        if selectionProof.receiveWordPacket(pasteboard), NativeServicePacket.isDedicated(pasteboard.name) {
+            error.pointee = nil
         }
     }
 

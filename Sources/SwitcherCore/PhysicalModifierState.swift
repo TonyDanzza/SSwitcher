@@ -5,8 +5,6 @@ public struct PhysicalModifierState {
     private var held: Set<UInt16> = []
     public init() {}
     public var observedModifiersClear: Bool { held.isEmpty }
-    public var shiftHeld: Bool { held.contains(56) || held.contains(60) }
-    public var otherModifierHeld: Bool { held.contains { $0 != 56 && $0 != 60 } }
     public func holds(any keys: Set<UInt16>) -> Bool { !held.isDisjoint(with: keys) }
     public func holdsOther(than keys: Set<UInt16>) -> Bool { held.contains { !keys.contains($0) } }
     public mutating func reset() { held.removeAll() }

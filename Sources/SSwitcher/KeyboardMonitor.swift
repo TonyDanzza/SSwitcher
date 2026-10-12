@@ -64,7 +64,7 @@ final class KeyboardMonitor {
         selectionKnownEmpty = true
     }
     func assumeSelectionEmpty() { selectionKnownEmpty = true }
-    func forgetTypedWord(_ reason: String = "replacement") {
+    func forgetTypedWord(_ reason: String) {
         if reason != "nativeConversion" && reason != "click" { selectionKnownEmpty = false }
         typedWord.reset()
         typedWordReset = reason; typedKeysSinceReset = 0; translatedKeysSinceReset = 0
@@ -93,10 +93,9 @@ final class KeyboardMonitor {
         burst.complete(at: ProcessInfo.processInfo.systemUptime, unverified: unverified)
         detector.reset()
     }
-    func focusChanged(isUserIntervention: Bool = true) {
+    func focusChanged() {
         inputGeneration &+= 1
-        if isUserIntervention { burst.realInput() }
-        else { burst.cancel() }
+        burst.realInput()
         pendingDispatch?.cancel(); pendingDispatch = nil
         detector.cancelGesture()
         onGestureCancelled?()
@@ -164,9 +163,11 @@ final class KeyboardMonitor {
     private func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             detector.reset()
+            modifiers.reset()
             forgetTypedWord("tapDisabled")
             burst.cancel()
             pendingDispatch?.cancel()
+            pendingDispatch = nil
             inputGeneration &+= 1
             onGestureCancelled?()
             onRealInput?()
@@ -220,13 +221,12 @@ final class KeyboardMonitor {
         }
         guard type == .flagsChanged else { detector.cancelGesture(); return }
         if let flag = Self.modifierFlags[key] { modifiers.changed(key: key, groupDown: event.flags.contains(flag)) }
+        guard triggerKeys.contains(key) else { detector.cancelGesture(); return }
         let triggers = triggerKeys
         let shiftDown = modifiers.holds(any: triggers) || triggers.contains(where: Self.hardwareKeyDown)
-        if triggers.contains(key) {
-            shiftEventCount += 1
-            burst.shiftChanged(down: shiftDown, at: ProcessInfo.processInfo.systemUptime)
-            pendingDispatch?.cancel()
-        }
+        shiftEventCount += 1
+        burst.shiftChanged(down: shiftDown, at: ProcessInfo.processInfo.systemUptime)
+        pendingDispatch?.cancel()
         if detector.shiftChanged(
             key: key, anyShiftDown: shiftDown,
             otherModifierDown: modifiers.holdsOther(than: triggers) ||

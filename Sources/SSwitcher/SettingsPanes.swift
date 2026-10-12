@@ -238,8 +238,7 @@ struct SettingsPanes: View {
     /// Another SSwitcher shortcut, including window arrows, cannot be shared.
     private func ownConflict(_ shortcut: KeyShortcut, besides other: KeyShortcut?, _ name: String) -> String? {
         if shortcut == other { return "Занято \(name)" }
-        let arrows: Set<UInt32> = [123, 124, 125, 126]
-        if settings.windowMovementEnabled, arrows.contains(shortcut.keyCode), shortcut.modifiers == settings.windowModifiers {
+        if settings.windowMovementEnabled, WindowMoveDirection.allCases.contains(where: { $0.keyCode == shortcut.keyCode }), shortcut.modifiers == settings.windowModifiers {
             return "Занято переносом окон"
         }
         return nil
@@ -281,6 +280,7 @@ struct SettingsPanes: View {
                     ForEach(managed) { display in
                         LabeledContent("Файл-описание «\(display.name)»") {
                             Button("Удалить…") { displays.removeOverride(for: display) }
+                                .disabled(displays.isChangingOverride)
                         }
                     }
                 } header: {
@@ -310,6 +310,7 @@ struct SettingsPanes: View {
         } else {
             LabeledContent {
                 Button("Добавить размеры HiDPI…") { displays.installOverride(for: display) }
+                    .disabled(displays.isChangingOverride)
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("HiDPI")

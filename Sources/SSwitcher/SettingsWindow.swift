@@ -50,7 +50,6 @@ final class SettingsStatus: ObservableObject {
     @Published var loginError: String?
     @Published var displays: [Display] = []
     @Published var availableDirections: Set<WindowMoveDirection> = []
-    @Published var registeredDirections: Set<WindowMoveDirection> = []
     @Published var windowShortcutProblem: String?
     @Published var lastWindowResult = ""
     @Published var functionShortcutBlocked = false
@@ -97,8 +96,10 @@ private final class SettingsTabsController: NSTabViewController {
 /// following the selected pane, the last pane remembered.
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     var onVisibilityChange: ((Bool) -> Void)?
+    var onTabChange: ((SettingsTab) -> Void)?
     private let tabs = SettingsTabsController()
-    private static let tabKey = "settingsTab"
+    /// Stored by name: the integer index of earlier builds shifted when tabs were reordered.
+    private static let tabKey = "settingsPane"
 
     init(settings: AppSettings, status: SettingsStatus, functionKeys: FunctionKeyController, displays: DisplayController,
          actions: SettingsActions) {
@@ -125,8 +126,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             tabs.addTabViewItem(item)
         }
         window.contentViewController = tabs
-        tabs.onSelect = { tab in UserDefaults.standard.set(tab.rawValue, forKey: Self.tabKey) }
-        let saved = SettingsTab(rawValue: UserDefaults.standard.integer(forKey: Self.tabKey)) ?? .general
+        tabs.onSelect = { [weak self] tab in
+            UserDefaults.standard.set("\(tab)", forKey: Self.tabKey)
+            self?.onTabChange?(tab)
+        }
+        let stored = UserDefaults.standard.string(forKey: Self.tabKey)
+        let saved = SettingsTab.allCases.first { "\($0)" == stored } ?? .general
         tabs.selectedTabViewItemIndex = saved.rawValue
         window.title = saved.title
         window.setFrameAutosaveName("SSwitcherSettingsWindow")
@@ -135,6 +140,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     var isVisible: Bool { window?.isVisible == true }
+    var selectedTab: SettingsTab? { SettingsTab(rawValue: tabs.selectedTabViewItemIndex) }
 
     func show(_ tab: SettingsTab? = nil) {
         if let tab { tabs.selectedTabViewItemIndex = tab.rawValue }

@@ -72,7 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.windowMoves.move(direction)
         }
         keepAwake.onChange = { [weak self] in self?.refreshStatusIcon(); self?.refreshSettingsStatus() }
-        functionKeys.start(shortcut: settings.functionKeyShortcut)
+        functionKeys.setShortcut(settings.functionKeyShortcut)
+        functionKeys.frontmostChanged()
         keepAwake.setShortcut(settings.keepAwakeShortcut)
         settings.onChange = { [weak self] in self?.settingsChanged() }
         applyDoubleShiftSettings()
@@ -418,6 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let window = SettingsWindowController(settings: settings, status: settingsStatus, functionKeys: functionKeys,
                                                   displays: displayController, actions: actions)
             window.onVisibilityChange = { [weak self] visible in self?.settingsVisibilityChanged(visible) }
+            window.onTabChange = { [weak self] _ in self?.refreshSettingsStatus() }
             settingsWindow = window
         }
         refreshSettingsStatus()
@@ -468,11 +470,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set(\.loginError, loginAtLaunch.lastError)
         let main = NSScreen.screens.first
         set(\.displays, NSScreen.screens.compactMap { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-            return SettingsStatus.Display(id: number.uint32Value, name: screen.localizedName, frame: screen.frame, isMain: screen == main)
+            screen.displayID.map { SettingsStatus.Display(id: $0, name: screen.localizedName, frame: screen.frame, isMain: screen == main) }
         })
         set(\.availableDirections, WindowShortcutDirections.available(in: WindowMoveController.currentDisplays()))
-        set(\.registeredDirections, windowHotKeys.isRegistered ? windowHotKeys.directions : [])
         set(\.windowShortcutProblem, windowShortcutWaitingReason.flatMap { $0 == "Ждёт второго дисплея" ? nil : $0 })
         set(\.lastWindowResult, windowMoves.lastResult)
         set(\.functionShortcutBlocked, !isRecordingShortcut && functionKeys.isShortcutBlocked)
@@ -482,7 +482,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set(\.hasBattery, keepAwake.hasBattery)
         set(\.lastAttempt, lastAttempt)
         set(\.lastResult, lastResult)
-        set(\.diagnostics, diagnosticsText())
+        // The report opens IOKit and power sources; build it only for the pane that shows it.
+        if settingsWindow?.selectedTab == .check { set(\.diagnostics, diagnosticsText()) }
     }
 
     private func copyReport() { DiagnosticsWindow.copyReport(diagnosticsText()) }
@@ -516,10 +517,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshSettingsStatus()
     }
     @objc private func openLoginSettings() { loginAtLaunch.openSettings() }
-
-    @objc private func showDiagnostics() {
-        presentDiagnostics(activateApplication: true)
-    }
 
     private func presentDiagnostics(activateApplication: Bool) {
         refreshPermissions()

@@ -18,17 +18,17 @@ final class PhysicalModifierStateTests: XCTestCase {
         state.changed(key: 56, groupDown: true)
         state.changed(key: 60, groupDown: true)
         state.changed(key: 56, groupDown: true) // left up, right still held
-        XCTAssertTrue(state.shiftHeld)
+        XCTAssertTrue(state.holds(any: [56, 60]))
         XCTAssertFalse(state.permitsMutation(hardwareKeysDown: []))
         state.changed(key: 60, groupDown: false)
-        XCTAssertFalse(state.shiftHeld)
+        XCTAssertFalse(state.holds(any: [56, 60]))
         XCTAssertTrue(state.permitsMutation(hardwareKeysDown: []))
     }
     func testStickyAggregateShiftFlagDoesNotTurnReleaseIntoNewPress() {
         var state = PhysicalModifierState()
         state.changed(key: 56, groupDown: true)
         state.changed(key: 56, groupDown: true) // aggregate flag still set on key-up
-        XCTAssertFalse(state.shiftHeld)
+        XCTAssertFalse(state.holds(any: [56, 60]))
         XCTAssertTrue(state.permitsMutation(hardwareKeysDown: []))
     }
     func testSyntheticEventsStillInHardwareQueueDoNotCancelGuardedContinuation() {

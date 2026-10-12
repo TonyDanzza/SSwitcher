@@ -11,8 +11,9 @@ enum KeyboardEvents {
 
     /// The final key-up receipt paces our batches through the system queue.
     /// It does not prove editor handling; fresh AX evidence is still required.
-    static func postAndAwaitDelivery(_ events: [CGEvent], targetPID: pid_t? = nil, directToTarget: Bool = true,
-                                    postingTap: CGEventTapLocation = .cghidEventTap,
+    /// With a target, events go through the session (its tap confirms
+    /// receipt); without one, through HID.
+    static func postAndAwaitDelivery(_ events: [CGEvent], targetPID: pid_t? = nil,
                                     completion: @escaping (Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let last = events.last, last.type == .keyUp, last.flags.isEmpty,
@@ -49,8 +50,7 @@ enum KeyboardEvents {
             event.timestamp = DispatchTime.now().uptimeNanoseconds
             // One batch uses one posting route. Splitting navigation and its
             // dependent service key across routes can reorder their arrival.
-            if let targetPID, directToTarget { event.postToPid(targetPID) }
-            else { event.post(tap: postingTap) }
+            event.post(tap: targetPID == nil ? .cghidEventTap : .cgSessionEventTap)
         }
         for event in events { post(event) }
     }
@@ -107,8 +107,7 @@ enum KeyboardEvents {
                 }
             }
             modifierReadiness = nil
-            postAndAwaitDelivery(batches[index], targetPID: targetPID, directToTarget: false,
-                                 postingTap: targetPID == nil ? .cghidEventTap : .cgSessionEventTap) { delivered in
+            postAndAwaitDelivery(batches[index], targetPID: targetPID) { delivered in
                 guard delivered, valid() else { completion(false); return }
                 index += 1
                 if index == batches.count { completion(true) }

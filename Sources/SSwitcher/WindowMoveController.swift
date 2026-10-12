@@ -12,8 +12,8 @@ private struct WindowScreenSnapshot: Equatable {
         let top = primary.frame.maxY
         var displays: [WindowDisplay] = []
         for screen in screens {
-            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-            displays.append(WindowDisplay(id: id.uint32Value,
+            guard let id = screen.displayID else { return nil }
+            displays.append(WindowDisplay(id: id,
                 frame: WindowTransferPlan.accessibilityRect(fromAppKit: screen.frame, primaryTop: top),
                 visibleFrame: WindowTransferPlan.accessibilityRect(fromAppKit: screen.visibleFrame, primaryTop: top)))
         }
@@ -343,6 +343,8 @@ final class WindowMoveController {
     private func finish(_ attempt: Attempt, message: String, outcome: String) {
         guard self.attempt === attempt else { return }
         attempt.cancellation.cancel(); attempt.poll?.cancel(); attempt.preparationTimeout?.cancel(); self.attempt = nil
+        // Work items capture the attempt; dropping them breaks that cycle.
+        attempt.poll = nil; attempt.preparationTimeout = nil
         // Geometry only: no window titles, application names or contents.
         var report: [String: Any] = ["outcome": outcome, "direction": String(describing: attempt.direction),
                                      "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - attempt.started) * 1000),

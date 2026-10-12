@@ -21,23 +21,7 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        // AppKit routes Command-C/V through the main menu's responder actions.
-        // A menu-bar-only app otherwise has no Edit menu for this test editor.
-        if NSApp.mainMenu == nil {
-            let main = NSMenu()
-            let item = NSMenuItem()
-            let edit = NSMenu(title: "Правка")
-            for (title, action, key) in [
-                ("Отменить", "undo:", "z"), ("Вырезать", "cut:", "x"),
-                ("Скопировать", "copy:", "c"), ("Вставить", "paste:", "v"),
-                ("Выделить всё", "selectAll:", "a")
-            ] {
-                edit.addItem(withTitle: title, action: NSSelectorFromString(action), keyEquivalent: key)
-            }
-            item.submenu = edit
-            main.addItem(item)
-            NSApp.mainMenu = main
-        }
+        // Command-C/V reach the test editor through AppMainMenu's Edit menu.
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
@@ -139,10 +123,8 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
     /// public display ID, independent of main-screen order, name or arrangement.
     /// No activation, foreign AX access or display-setting change occurs here.
     @objc private func moveToMacBook() {
-        guard let window, let screen = NSScreen.screens.first(where: { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
-            return CGDisplayIsBuiltin(CGDirectDisplayID(number.uint32Value)) != 0
-        }) else { return }
+        guard let window, let screen = NSScreen.screens.first(where: { $0.displayID.map(CGDisplayIsBuiltin) ?? 0 != 0 })
+        else { return }
         let work = screen.visibleFrame
         guard [work.minX, work.minY, work.width, work.height].allSatisfy({ $0.isFinite }),
               work.width > 0, work.height > 0 else { return }

@@ -9,8 +9,6 @@ public enum InputMethodIdentity {
     public static let installedName = "SSwitcher Input.app"
     public static let controllerClass = "SSwitcherInputController"
     public static let reportKey = "LastNativeInputDiagnostic"
-    public static let requestIDKey = "LastNativeInputRequestID"
-    public static let responseIDKey = "LastNativeInputResponseID"
     public static let requestName = Notification.Name(bundleID + ".ConvertText")
     public static let resetName = Notification.Name(bundleID + ".ResetGesture")
     public static let resultName = Notification.Name(bundleID + ".ResultChanged")
@@ -18,13 +16,11 @@ public enum InputMethodIdentity {
     public static let requestLifetime: Double = 1
     public static let readBudget: Double = 0.6
     public static let acknowledgementBudget: Double = 0.35
-    public static let resultLifetime: Double = requestLifetime + acknowledgementBudget + 0.2
 
     public enum Mode: String, CaseIterable {
         case english = "com.tonydanzza.inputmethod.SSwitcher.English"
         case russian = "com.tonydanzza.inputmethod.SSwitcher.Russian"
         public var language: String { self == .english ? "en" : "ru" }
-        public var title: String { self == .english ? "SSwitcher English" : "SSwitcher Русский" }
         fileprivate var keyboardPreference: String { self == .english ? "NativeEnglishKeyboardSourceID" : "NativeRussianKeyboardSourceID" }
     }
 
@@ -122,16 +118,6 @@ public enum InputMethodIdentity {
         languages(source).contains { $0 == mode.language || $0.hasPrefix(mode.language + "-") }
     }
 
-    /// Remember only the selected layout ID, never keys or typed characters.
-    public static func rememberSelectedKeyboard() {
-        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              string(kTISPropertyInputSourceType, of: source) == kTISTypeKeyboardLayout as String,
-              let id = string(kTISPropertyInputSourceID, of: source) else { return }
-        for mode in Mode.allCases where supports(mode, source: source) {
-            CFPreferencesSetAppValue(mode.keyboardPreference as CFString, id as CFString, utilityBundleID as CFString)
-        }
-        CFPreferencesAppSynchronize(utilityBundleID as CFString)
-    }
 
     public static func systemKeyboardSource(for mode: Mode) -> TISInputSource? {
         let filter = [kTISPropertyInputSourceType: kTISTypeKeyboardLayout as Any,

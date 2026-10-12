@@ -2,6 +2,13 @@ import AppKit
 import CoreGraphics
 import SwitcherCore
 
+extension NSScreen {
+    /// The CoreGraphics display this screen shows.
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
 /// Displays for the Settings pane: their sizes, switching with public
 /// CoreGraphics calls, and the HiDPI override file. Writing or removing the
 /// file is the only privileged step; macOS asks for the administrator
@@ -10,7 +17,6 @@ final class DisplayController: ObservableObject {
     struct Size: Hashable {
         let width: Int, height: Int
         let hiDPI: Bool
-        var title: String { "\(width) × \(height)" + (hiDPI ? " (HiDPI)" : "") }
     }
 
     struct Display: Identifiable, Equatable {
@@ -30,6 +36,8 @@ final class DisplayController: ObservableObject {
     @Published private(set) var lastMessage: String?
     /// Override files changed in this session; they apply after a restart.
     @Published private(set) var pendingRestart = Set<String>()
+    /// The administrator prompt is open or its command is running.
+    @Published private(set) var isChangingOverride = false
     private static let supportFolder = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/SSwitcher/DisplayOverrides")
 
@@ -38,8 +46,7 @@ final class DisplayController: ObservableObject {
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return }
         let names = Dictionary(NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, String)? in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-            return (number.uint32Value, screen.localizedName)
+            screen.displayID.map { ($0, screen.localizedName) }
         }, uniquingKeysWith: { first, _ in first })
         let value = ids.prefix(Int(count)).filter { CGDisplayMirrorsDisplay($0) == kCGNullDirectDisplay }.map { id in
             Self.describe(id, name: names[id] ?? "Дисплей")
@@ -141,15 +148,19 @@ final class DisplayController: ObservableObject {
             let q = DisplayOverride.shellQuoted
             let command = "/bin/mkdir -p \(q(folder)) && /bin/cp \(q(file.path)) \(q(target)) && " +
                 "/usr/sbin/chown root:wheel \(q(target)) && /bin/chmod 644 \(q(target))"
-            if runPrivileged(command) {
-                pendingRestart.insert(target)
-                lastMessage = "Файл добавлен. Перезагрузите Mac, чтобы появились размеры HiDPI."
+            runPrivileged(command) { [weak self] done in
+                try? FileManager.default.removeItem(at: file)
+                guard let self else { return }
+                if done {
+                    self.pendingRestart.insert(target)
+                    self.lastMessage = "Файл добавлен. Перезагрузите Mac, чтобы появились размеры HiDPI."
+                }
+                self.refresh()
             }
-            try? FileManager.default.removeItem(at: file)
         } catch {
             lastMessage = "Не удалось подготовить файл: \(error.localizedDescription)"
+            refresh()
         }
-        refresh()
     }
 
     /// Keeps a copy in Application Support before deleting, so another
@@ -164,28 +175,62 @@ final class DisplayController: ObservableObject {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = display.overridePath
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let backup = Self.supportFolder.appendingPathComponent("removed-\(stamp)")
-            .appendingPathComponent(DisplayOverride.relativePath(vendor: display.vendor, model: display.model))
-        try? FileManager.default.createDirectory(at: backup.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? FileManager.default.copyItem(atPath: target, toPath: backup.path)
+        let backupRoot = Self.supportFolder.appendingPathComponent("removed-\(stamp)")
+        let backup = backupRoot.appendingPathComponent(DisplayOverride.relativePath(vendor: display.vendor, model: display.model))
+        // Never delete a file whose copy could not be kept.
+        if FileManager.default.fileExists(atPath: target) {
+            do {
+                try FileManager.default.createDirectory(at: backup.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.copyItem(atPath: target, toPath: backup.path)
+            } catch {
+                try? FileManager.default.removeItem(at: backupRoot)
+                lastMessage = "Не удалось сохранить копию файла, он не удалён: \(error.localizedDescription)"
+                return
+            }
+        }
         let q = DisplayOverride.shellQuoted
         let folder = (target as NSString).deletingLastPathComponent
-        if runPrivileged("/bin/rm -f \(q(target)) \(q(target + ".icns")); /bin/rmdir \(q(folder)) 2>/dev/null; true") {
-            pendingRestart.insert(target)
-            lastMessage = "Файл убран, копия сохранена. Перезагрузите Mac."
+        runPrivileged("/bin/rm -f \(q(target)) \(q(target + ".icns")); /bin/rmdir \(q(folder)) 2>/dev/null; true") { [weak self] done in
+            if !done { try? FileManager.default.removeItem(at: backupRoot) }
+            guard let self else { return }
+            if done {
+                self.pendingRestart.insert(target)
+                self.lastMessage = "Файл убран, копия сохранена. Перезагрузите Mac."
+            }
+            self.refresh()
         }
-        refresh()
     }
 
-    /// macOS's own administrator prompt. A cancelled prompt is not an error.
-    private func runPrivileged(_ command: String) -> Bool {
+    /// macOS's own administrator prompt, run by osascript so the main run
+    /// loop (event tap, shortcuts, timers) keeps going while it is open.
+    /// A cancelled prompt is not an error. `completion` runs on main.
+    private func runPrivileged(_ command: String, completion: @escaping (Bool) -> Void) {
+        guard !isChangingOverride else { return }
         let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        var error: NSDictionary?
-        NSAppleScript(source: "do shell script \"\(escaped)\" with administrator privileges")?.executeAndReturnError(&error)
-        guard let error else { return true }
-        if (error[NSAppleScript.errorNumber] as? Int) != -128 {
-            lastMessage = "Не удалось изменить системную папку: \(error[NSAppleScript.errorMessage] as? String ?? "ошибка")"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "do shell script \"\(escaped)\" with administrator privileges"]
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            let message = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let done = process.terminationStatus == 0
+            DispatchQueue.main.async {
+                self?.isChangingOverride = false
+                if !done, !message.contains("(-128)") {
+                    self?.lastMessage = "Не удалось изменить системную папку: \(message.isEmpty ? "ошибка" : message)"
+                }
+                completion(done)
+            }
         }
-        return false
+        do {
+            try process.run()
+            isChangingOverride = true
+        } catch {
+            lastMessage = "Не удалось запросить пароль администратора: \(error.localizedDescription)"
+            completion(false)
+        }
     }
 }

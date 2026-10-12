@@ -71,8 +71,10 @@ public struct AccessibilitySelectionPlan: Equatable {
         guard range.location >= 0, range.length >= 0, range.location <= count,
               range.length <= count - range.location,
               let result = Range(range, in: document),
-              (result.lowerBound == document.endIndex || document.indices.contains(result.lowerBound)),
-              (result.upperBound == document.endIndex || document.indices.contains(result.upperBound)) else { return nil }
+              // Character boundaries, checked locally instead of walking every
+              // character of the document.
+              String.Index(result.lowerBound, within: document) != nil,
+              String.Index(result.upperBound, within: document) != nil else { return nil }
         return result
     }
 }

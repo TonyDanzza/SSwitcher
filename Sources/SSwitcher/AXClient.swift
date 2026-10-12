@@ -85,7 +85,9 @@ final class AXClient {
         return (reply.element.map(configured), AXFocusReadDiagnostic(reply))
     }
 
-    func target(fallbackPID: pid_t) -> AXEditorTarget? {
+    /// `detectSpotlight: false` skips the Spotlight proof for callers that
+    /// compare only the focused element.
+    func target(fallbackPID: pid_t, detectSpotlight: Bool = true) -> AXEditorTarget? {
         let system = configured(AXUIElementCreateSystemWide())
         let systemRead = focusedElement(system)
         var diagnostic = AXFocusDiscoveryDiagnostic(system: systemRead.diagnostic)
@@ -93,7 +95,8 @@ final class AXClient {
             var pid: pid_t = 0
             let error = AXUIElementGetPid(focus, &pid)
             if error == .success {
-                return AXEditorTarget(pid: pid, focused: focus, spotlight: spotlightFocus(focus, pid: pid), focusDiscovery: diagnostic)
+                return AXEditorTarget(pid: pid, focused: focus, spotlight: detectSpotlight ? spotlightFocus(focus, pid: pid) : nil,
+                                       focusDiscovery: diagnostic)
             }
             diagnostic.systemOwnerError = error
         }
@@ -666,7 +669,8 @@ final class AXClient {
     func focusMatches(_ context: AXEditorContext) -> Bool {
         if let spotlight = context.spotlightFocus { return systemSpotlightMatches(spotlight, pid: context.application.pid) }
         if let window = context.qtFocusedWindow { return qtFocusMatches(context, window: window) }
-        guard let current = target(fallbackPID: context.application.pid), current.pid == context.application.pid else { return false }
+        guard let current = target(fallbackPID: context.application.pid, detectSpotlight: false),
+              current.pid == context.application.pid else { return false }
         if let original = context.focused { return current.focused.map { CFEqual($0, original) } ?? false }
         return false
     }

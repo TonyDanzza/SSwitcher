@@ -1,6 +1,13 @@
 import Foundation
 
-public enum WindowMoveDirection: UInt32, CaseIterable { case left = 1, right, up, down }
+public enum WindowMoveDirection: UInt32, CaseIterable {
+    case left = 1, right, up, down
+
+    /// The arrow's virtual key code.
+    public var keyCode: UInt32 {
+        switch self { case .left: 123; case .right: 124; case .down: 125; case .up: 126 }
+    }
+}
 
 /// All rectangles use Accessibility's global top-left coordinates, in points.
 public struct WindowDisplay: Equatable {

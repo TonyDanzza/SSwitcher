@@ -8,7 +8,6 @@ import SwitcherCore
 /// parameter. Application rules change only the live parameter while the
 /// application is frontmost, so the preference always holds the base mode.
 final class FunctionKeyController: NSObject, ObservableObject {
-    var onChange: (() -> Void)?
     @Published private(set) var policy: FunctionKeyPolicy
     @Published private(set) var lastError: String?
     private let hotKey = GlobalHotKey(signature: 0x5353464E) // SSFN
@@ -24,11 +23,6 @@ final class FunctionKeyController: NSObject, ObservableObject {
 
     var shortcut: KeyShortcut? { hotKey.shortcut }
     var isShortcutBlocked: Bool { hotKey.isBlocked }
-
-    func start(shortcut: KeyShortcut?) {
-        hotKey.start(shortcut)
-        frontmostChanged()
-    }
 
     /// nil removes the shortcut (also while Settings records a new one).
     func setShortcut(_ shortcut: KeyShortcut?) {
@@ -75,14 +69,12 @@ final class FunctionKeyController: NSObject, ObservableObject {
         policy.setRule(mode, for: bundleID)
         saveRules()
         frontmostChanged()
-        onChange?()
     }
 
     private func setBase(_ mode: FunctionKeyMode) {
         policy.base = mode
         if Self.setPreference(mode) { frontmostChanged() }
         else { lastError = "Не удалось сохранить режим верхнего ряда" }
-        onChange?()
     }
 
     private func shortcutPressed() {
@@ -99,7 +91,6 @@ final class FunctionKeyController: NSObject, ObservableObject {
         } else {
             StatusHUD.shared.show("Верхний ряд не переключился", detail: "Подробности в настройках SSwitcher", force: true)
         }
-        onChange?()
     }
 
     private func saveRules() {

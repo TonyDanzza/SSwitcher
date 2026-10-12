@@ -52,11 +52,6 @@ enum InputSources {
         return Unmanaged<CFString>.fromOpaque(pointer).takeUnretainedValue() as String
     }
 
-    static var currentName: String {
-        guard let current = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return "—" }
-        return string(kTISPropertyLocalizedName, of: current) ?? "—"
-    }
-
     private static func languages(_ source: TISInputSource) -> [String] {
         guard let pointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages) else { return [] }
         return Unmanaged<CFArray>.fromOpaque(pointer).takeUnretainedValue() as? [String] ?? []

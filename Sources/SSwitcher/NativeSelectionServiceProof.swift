@@ -63,17 +63,16 @@ final class NativeSelectionServiceProof {
 
     private func startWord(_ request: Automatic, direct: Bool, deadline: ReadinessDeadline, epoch: Int) {
         let identity = request.identity
-        func localReady() -> Bool {
-            generation == epoch && automatic === request && request.valid() &&
-                !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && contextMatches(identity)
+        // Weak captures: the shield and the coordinator keep this closure
+        // after the request is retired.
+        let isCurrent: () -> Bool = { [weak self, weak request] in
+            guard let self, let request else { return false }
+            return self.generation == epoch && self.automatic === request && request.valid() &&
+                !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && self.contextMatches(identity)
         }
-        guard localReady() else { finishAutomatic(.cancelled); return }
+        guard isCurrent() else { finishAutomatic(.cancelled); return }
         let word = NativeWordServiceCoordinator(pid: identity.pid, window: identity.window, direct: direct,
-            valid: { [weak self, weak request] in
-                guard let self, let request else { return false }
-                return self.generation == epoch && self.automatic === request && request.valid() &&
-                    !deadline.expired(at: ProcessInfo.processInfo.systemUptime) && self.contextMatches(identity)
-            }, beforeKeys: { [weak self] in
+            valid: isCurrent, beforeKeys: { [weak self] in
                 guard let self else { return false }
                 let capture = self.captureWindow(armDeadline: deadline)
                 return capture.identity.map { $0.pid == identity.pid && $0.sourceID == identity.sourceID &&
@@ -88,12 +87,9 @@ final class NativeSelectionServiceProof {
                     let bounds = NativeWindowLocator.windowBounds(identity.window, pid: identity.pid)
                     DispatchQueue.main.async { [weak self, weak request] in
                         guard let self, let request, self.generation == epoch, self.automatic === request else { return }
-                        self.visualShield.prepare(bounds: bounds, valid: { [weak self, weak request] in
-                            guard let self, let request else { return false }
-                            return self.generation == epoch && self.automatic === request && localReady()
-                        }) { [weak self, weak request] in
+                        self.visualShield.prepare(bounds: bounds, valid: isCurrent) { [weak self, weak request] in
                             guard let self, let request, self.generation == epoch, self.automatic === request else { return }
-                            guard localReady() else { self.finishAutomatic(.cancelled); return }
+                            guard isCurrent() else { self.finishAutomatic(.cancelled); return }
                             resume()
                         }
                     }

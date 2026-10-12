@@ -7,7 +7,6 @@ import SwitcherCore
 /// draws a field-like bezel and reads key events while it is first responder.
 final class ShortcutRecorderView: NSView {
     var shortcut: KeyShortcut? { didSet { refresh() } }
-    var allowsEmpty = true
     var onChange: ((KeyShortcut?) -> Void)?
     var onRecordingChange: ((Bool) -> Void)?
     /// Extra checks, such as a clash with another SSwitcher shortcut.
@@ -82,18 +81,13 @@ final class ShortcutRecorderView: NSView {
     private func record(_ event: NSEvent) {
         let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
         if flags.isEmpty && event.keyCode == 53 { window?.makeFirstResponder(nil); return }
-        if flags.isEmpty && (event.keyCode == 51 || event.keyCode == 117) && allowsEmpty {
+        if flags.isEmpty && (event.keyCode == 51 || event.keyCode == 117) {
             shortcut = nil
             onChange?(nil)
             window?.makeFirstResponder(nil)
             return
         }
-        var modifiers: KeyShortcut.Modifiers = []
-        if flags.contains(.control) { modifiers.insert(.control) }
-        if flags.contains(.option) { modifiers.insert(.option) }
-        if flags.contains(.shift) { modifiers.insert(.shift) }
-        if flags.contains(.command) { modifiers.insert(.command) }
-        let candidate = KeyShortcut(keyCode: UInt32(event.keyCode), modifiers: modifiers)
+        let candidate = KeyShortcut(keyCode: UInt32(event.keyCode), modifiers: KeyShortcut.Modifiers(flags: flags))
         let problem: String?
         switch candidate.problem {
         case .needsModifier: problem = "Добавьте ⌃, ⌥ или ⌘"
@@ -157,7 +151,6 @@ private extension KeyShortcut.Modifiers {
 
 struct ShortcutField: NSViewRepresentable {
     @Binding var shortcut: KeyShortcut?
-    var allowsEmpty = true
     var validate: ((KeyShortcut) -> String?)?
     var confirm: ((KeyShortcut) -> Bool)?
     var onRecordingChange: (Bool) -> Void = { _ in }
@@ -173,7 +166,6 @@ struct ShortcutField: NSViewRepresentable {
 
     private func update(_ view: ShortcutRecorderView) {
         if view.shortcut != shortcut { view.shortcut = shortcut }
-        view.allowsEmpty = allowsEmpty
         view.validate = validate
         view.confirm = confirm
         view.onChange = { shortcut = $0 }

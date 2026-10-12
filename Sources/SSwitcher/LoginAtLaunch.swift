@@ -8,13 +8,6 @@ final class LoginAtLaunch {
     private(set) var isChanging = false
     private(set) var lastError: String?
     var status: SMAppService.Status { SMAppService.mainApp.status }
-    var state: NSControl.StateValue {
-        switch status {
-        case .enabled: return .on
-        case .requiresApproval: return .mixed
-        default: return .off
-        }
-    }
     var statusDescription: String {
         switch status {
         case .enabled: return "Автозапуск включён"

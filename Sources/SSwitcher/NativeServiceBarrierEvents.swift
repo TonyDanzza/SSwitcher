@@ -30,15 +30,13 @@ enum NativeServiceBarrierEvents {
         }
         return result
     }
-    static func batch(_ navigation: [(CGKeyCode, CGEventFlags)],
-                      state: CGEventSourceStateID = .privateState) -> [CGEvent]? {
+    static func batch(_ navigation: [(CGKeyCode, CGEventFlags)]) -> [CGEvent]? {
         let modifiers: CGEventFlags = [.maskShift, .maskCommand, .maskControl, .maskAlternate]
         guard CGPreflightPostEventAccess(), !IsSecureEventInputEnabled(),
               CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty,
-              !CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Function)),
-              navigation.count <= 257 else { return nil }
+              !CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Function)) else { return nil }
         // Synthetic modifiers must not become hardware state: the conversion
         // guard also checks real held Shift/Option keys between commands.
-        return KeyboardNavigationEvents.make(navigation, sourceMarker: KeyboardEventDelivery.sourceMarker, state: state)
+        return KeyboardNavigationEvents.make(navigation, sourceMarker: KeyboardEventDelivery.sourceMarker, state: .privateState)
     }
 }

@@ -270,15 +270,19 @@ final class ConversionCoordinator {
     private func validateBeforeMutation(_ attempt: ConversionAttempt) {
         attempt.phase = "prewrite"
         guard let context = attempt.context else { finish(attempt, outcome: .cancelled); return }
+        // The attempt belongs to the main thread; the worker gets copies.
+        let original = (document: attempt.originalDocument, range: attempt.originalRange)
+        let selected = attempt.selected, selectionPlan = attempt.selectionPlan, scopePlan = attempt.scopePlan
+        let replacementText = attempt.converted?.text, cancellation = attempt.cancellation
         read(attempt, operation: { client -> PrewriteRead? in
-            guard let document = attempt.originalDocument, let range = attempt.originalRange,
+            guard let document = original.document, let range = original.range,
                   let snapshot = client.validate(context, document: document, range: range, includeContext: true),
                   client.isEditable(context, snapshot: snapshot),
                   context.policy.isCanvasTextEditor(snapshot) == context.isCanvasTextEditor else { return nil }
-            if attempt.selected, context.spotlightFocus != nil,
+            if selected, context.spotlightFocus != nil,
                !SpotlightSearchScope.hasRequiredNativeRangeCapability(verifiedOverlay: true, nativeRangeSettable: client.hasNativeRangeSetter(context)) { return nil }
             let matches: Bool
-            if let selection = attempt.selectionPlan {
+            if let selection = selectionPlan {
                 matches = selection.matches(document: snapshot.value, range: snapshot.range, selectedText: snapshot.selectedText,
                                             selectedRanges: snapshot.selectedRanges)
             } else {
@@ -286,12 +290,12 @@ final class ConversionCoordinator {
                                                                     selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: range)
             }
             guard matches else { return nil }
-            guard let scope = attempt.scopePlan else { return nil }
+            guard let scope = scopePlan else { return nil }
             let proof = client.textScope(context, document: scope.document, range: scope.range,
-                                         cancellation: attempt.cancellation)
+                                         cancellation: cancellation)
             guard proof.permitsUse else { return .scopeRefused(proof) }
-            let backend = client.replacementBackend(context, snapshot: snapshot, selected: attempt.selected,
-                                                    replacementText: attempt.converted?.text)
+            let backend = client.replacementBackend(context, snapshot: snapshot, selected: selected,
+                                                    replacementText: replacementText)
             if context.qtFocusedWindow != nil, !client.focusMatches(context) { return nil }
             return .ready(backend, proof)
         }) { prepared in

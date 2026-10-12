@@ -72,8 +72,7 @@ final class NativeWordServiceCoordinator {
         committing = true
         record("selectionIssued")
         armTimeout("MAX не подтвердил завершение запроса выделения")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false,
-            postingTap: .cgSessionEventTap) { [weak self] delivered in
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
                 guard let self, self.live, self.phase == "selection" else { return }
                 self.selectionState.delivery(delivered)
                 self.completeSelection()
@@ -117,7 +116,7 @@ final class NativeWordServiceCoordinator {
         read({ [weak self] following in
             guard let self, self.live else { return }
             guard NativeWordBoundaryPlan.isFollowingDelimiter(following) else {
-                self.perform([(CGKeyCode(kVK_LeftArrow), [])]) { [weak self] in
+                self.perform(kVK_LeftArrow) { [weak self] in
                     self?.fail("Курсор должен стоять в конце преобразуемого слова")
                 }
                 return
@@ -148,8 +147,7 @@ final class NativeWordServiceCoordinator {
         wordIssuedAt = ProcessInfo.processInfo.systemUptime
         armTimeout("MAX не предоставил слово для нативной замены")
         record("wordCommitIssued")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false,
-            postingTap: .cgSessionEventTap) { [weak self] delivered in
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
                 guard let self, self.live else { return }
                 self.commitState.pressed(delivered)
                 if !delivered { self.fail("Нативный вызов замены не доставлен MAX"); return }
@@ -205,7 +203,7 @@ final class NativeWordServiceCoordinator {
             phase = "collapsing"
             DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.nativeServiceReturnSettle) { [weak self] in
                 guard let self, self.live else { return }
-                self.perform([(CGKeyCode(kVK_RightArrow), [])]) { [weak self] in
+                self.perform(kVK_RightArrow) { [weak self] in
                     self?.fail("Слово перед курсором не требует замены или не подходит для неё")
                 }
             }
@@ -229,24 +227,17 @@ final class NativeWordServiceCoordinator {
         return resolvedWindowNumber
     }
 
-    private func perform(_ steps: [(CGKeyCode, CGEventFlags)], then: @escaping () -> Void) {
-        guard !steps.isEmpty else { then(); return }
-        if steps.count > 1 {
-            perform([steps[0]]) { [weak self] in
-                self?.perform(Array(steps.dropFirst()), then: then)
-            }
-            return
-        }
+    /// One plain navigation key, then a settle before `then`.
+    private func perform(_ key: Int, then: @escaping () -> Void) {
         guard live else { return }
-        guard waitForModifiers({ [weak self] in self?.perform(steps, then: then) }) else { return }
+        guard waitForModifiers({ [weak self] in self?.perform(key, then: then) }) else { return }
         guard beforeKeys(), let number = windowNumber(),
-              let raw = NativeServiceBarrierEvents.batch(steps, state: .privateState),
+              let raw = NativeServiceBarrierEvents.batch([(CGKeyCode(key), [])]),
               let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
             fail("Замена отменена: исходное окно или клавиши недоступны"); return
         }
         armTimeout("MAX не подтвердил доставку навигации")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false,
-            postingTap: .cgSessionEventTap) { [weak self] delivered in
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
             guard let self, self.live else { return }
             self.timeout?.cancel(); self.timeout = nil
             guard delivered else { self.fail("Навигация не доставлена MAX"); return }
@@ -272,7 +263,7 @@ final class NativeWordServiceCoordinator {
         let ticket = Packet(completion, noSelection: noSelection)
         packet = ticket
         armPacketTimeout(ticket)
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, directToTarget: false, postingTap: .cgSessionEventTap) { [weak self] delivered in
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
             guard let self, self.live, self.packet === ticket else { return }
             guard delivered else { self.fail("Вызов службы не доставлен MAX"); return }
             ticket.state.delivery(true)

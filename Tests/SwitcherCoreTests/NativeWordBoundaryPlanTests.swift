@@ -11,13 +11,12 @@ final class NativeWordBoundaryPlanTests: XCTestCase {
             XCTAssertNil(NativeWordBoundaryPlan(selection: text), text)
         }
     }
-    func testOnlyOneExplicitWhitespaceGraphemeProvesRightBoundary() throws {
-        let plan = try XCTUnwrap(NativeWordBoundaryPlan(selection: "ghbdtn"))
+    func testOnlyOneExplicitWhitespaceGraphemeProvesRightBoundary() {
         for delimiter in [" ", "\n", "\r\n", "\t", "\u{00a0}"] {
-            XCTAssertTrue(plan.acceptsFollowingSelection(delimiter), delimiter)
+            XCTAssertTrue(NativeWordBoundaryPlan.isFollowingDelimiter(delimiter), delimiter)
         }
         for invalid in ["", "d", "  ", " word", "ghbdtn", "👩‍💻", "!"] {
-            XCTAssertFalse(plan.acceptsFollowingSelection(invalid), invalid)
+            XCTAssertFalse(NativeWordBoundaryPlan.isFollowingDelimiter(invalid), invalid)
         }
     }
     func testExactCommitPreservesUnicodeNormalizationAndRejectsNeighbors() throws {
