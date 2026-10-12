@@ -7,74 +7,61 @@ private final class SnapshotPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Main-thread presenter owns both pending captures and visible panels. A late
-/// screenshot completion cannot publish pixels after input/focus cancellation.
-final class ReplacementOverlay {
-    static var enabled: Bool {
-        get { !UserDefaults.standard.bool(forKey: "disableSmoothReplacement") }
-        set { UserDefaults.standard.set(!newValue, forKey: "disableSmoothReplacement") }
-    }
-    private(set) var lastStatus = "Ожидание замены"
+/// One in-memory screenshot of exact screen bounds, for the MAX visual
+/// shield. The main-thread owner holds the pending capture and the visible
+/// panel; a late completion cannot publish pixels after cancellation.
+final class WindowSnapshot {
+    private(set) var lastStatus = "Ожидание снимка"
     private var pending: CaptureRequest?
     private var active: ImageOverlay?
-    /// No capture is pending and no snapshot is on screen.
-    var isIdle: Bool { pending == nil && active == nil }
-    var canCapture: Bool {
-        canCapture(requiredMask: false)
-    }
-    private func canCapture(requiredMask: Bool) -> Bool {
-        dispatchPrecondition(condition: .onQueue(.main))
-        guard requiredMask || (Self.enabled && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) else { lastStatus = "Анимация выключена"; return false }
-        guard #available(macOS 15.2, *) else { lastStatus = "Анимация требует macOS 15.2"; return false }
-        guard CGPreflightScreenCaptureAccess() else { lastStatus = "Для анимации разрешите запись экрана"; return false }
-        return true
-    }
+
     func cancel() {
         dispatchPrecondition(condition: .onQueue(.main))
         let request = pending; pending = nil
         request?.finish(.cancelled)
         active?.close(); active = nil
     }
-    func prepare(bounds: CGRect?, padding: Bool = true, requiredMask: Bool = false, valid: @escaping () -> Bool, completion: @escaping (PreparationResult<ImageOverlay>) -> Void) {
+
+    func prepare(bounds: CGRect?, valid: @escaping () -> Bool, completion: @escaping (PreparationResult<ImageOverlay>) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         cancel()
-        guard canCapture(requiredMask: requiredMask) else { completion(.skipped); return }
-        guard #available(macOS 15.2, *), let bounds, let primary = NSScreen.screens.first else {
-            lastStatus = "Редактор не предоставил точные границы слова"; completion(.skipped); return
+        guard #available(macOS 15.2, *) else { lastStatus = "Снимок требует macOS 15.2"; completion(.skipped); return }
+        guard CGPreflightScreenCaptureAccess() else { lastStatus = "Для снимка разрешите запись экрана"; completion(.skipped); return }
+        guard let bounds, let primary = NSScreen.screens.first else {
+            lastStatus = "Нет точных границ окна"; completion(.skipped); return
         }
-        let padded = padding ? bounds.insetBy(dx: -max(10, bounds.width * 0.35), dy: -4).integral : bounds.integral
-        let frame = CGRect(x: padded.minX, y: primary.frame.maxY - padded.maxY, width: padded.width, height: padded.height)
+        let area = bounds.integral
+        let frame = CGRect(x: area.minX, y: primary.frame.maxY - area.maxY, width: area.width, height: area.height)
         guard NSScreen.screens.contains(where: { $0.frame.contains(frame) }), valid() else {
-            lastStatus = "Анимация пропущена: границы вне экрана"; completion(.skipped); return
+            lastStatus = "Снимок пропущен: границы вне экрана"; completion(.skipped); return
         }
-        let started = ProcessInfo.processInfo.systemUptime
         let request = CaptureRequest(completion: completion)
         pending = request
         let timeout = DispatchWorkItem { [weak self, weak request] in
             guard let self, let request, self.pending === request else { return }
             self.pending = nil
-            self.lastStatus = "Анимация пропущена: превышено время захвата"
+            self.lastStatus = "Снимок пропущен: превышено время захвата"
             request.finish(.skipped)
         }
         request.timeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + (requiredMask ? 0.2 : ConversionTiming.captureBudget), execute: timeout)
-        SCScreenshotManager.captureImage(in: padded) { [weak self, weak request] image, _ in
+        DispatchQueue.main.asyncAfter(deadline: .now() + ConversionTiming.snapshotBudget, execute: timeout)
+        SCScreenshotManager.captureImage(in: area) { [weak self, weak request] image, _ in
             DispatchQueue.main.async {
                 guard let self, let request, self.pending === request else { return }
                 self.pending = nil
-                guard valid() else { self.lastStatus = "Анимация пропущена: захват отменён"; request.finish(.cancelled); return }
-                guard let image else { self.lastStatus = "Анимация пропущена: захват недоступен"; request.finish(.skipped); return }
+                guard valid() else { self.lastStatus = "Снимок отменён"; request.finish(.cancelled); return }
+                guard let image else { self.lastStatus = "Снимок недоступен"; request.finish(.skipped); return }
                 let overlay = ImageOverlay(image: image, frame: frame)
                 self.active = overlay
                 overlay.onClose = { [weak self, weak overlay] in
                     if self?.active === overlay { self?.active = nil }
                 }
-                self.lastStatus = "Снимок: \(Int((ProcessInfo.processInfo.systemUptime - started) * 1000)) мс; переход: 90 мс"
+                self.lastStatus = "Снимок готов"
                 request.finish(.ready(overlay))
             }
         }
     }
-    func skipMultiline() { lastStatus = "Анимация пропущена: многострочный текст" }
+
     private final class CaptureRequest {
         var timeout: DispatchWorkItem?
         private let delivery: PreparationDelivery<ImageOverlay>
@@ -92,7 +79,6 @@ final class ImageOverlay {
     private let panel: NSPanel
     private var watchdog: DispatchWorkItem?
     private var closed = false
-    private var revealed: (() -> Void)?
     init(image: CGImage, frame: CGRect) {
         dispatchPrecondition(condition: .onQueue(.main))
         panel = SnapshotPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -114,22 +100,13 @@ final class ImageOverlay {
         view.setAccessibilityElement(false)
         panel.contentView = view
     }
-    func show(watchdogDuration: Double = ConversionTiming.overlayWatchdog) {
+    func show(watchdogDuration: Double) {
         guard !closed else { return }
         panel.orderFrontRegardless()
         panel.displayIfNeeded()
         let watchdog = DispatchWorkItem { [weak self] in self?.close() }
         self.watchdog = watchdog
         DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDuration, execute: watchdog)
-    }
-    func reveal(completion: @escaping () -> Void) {
-        guard !closed else { completion(); return }
-        guard ReplacementOverlay.enabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { close(); completion(); return }
-        revealed = completion
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = ConversionTiming.revealDuration
-            panel.animator().alphaValue = 0
-        } completionHandler: { [weak self] in self?.close() }
     }
     func close() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -139,8 +116,6 @@ final class ImageOverlay {
         panel.orderOut(nil)
         panel.contentView = nil
         panel.close()
-        let completion = revealed; revealed = nil
-        completion?()
         let closedCallback = onClose; onClose = nil
         closedCallback?()
     }

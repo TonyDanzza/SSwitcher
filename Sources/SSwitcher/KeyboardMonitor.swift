@@ -6,7 +6,6 @@ final class KeyboardMonitor {
     var onDoubleShift: (() -> Void)?
     /// Called inside the listening tap for every non-key-up event; keep it to
     /// a cheap check and dispatch AppKit work.
-    var onUserActivity: (() -> Void)?
     var onRealInput: (() -> Void)?
     var onWindowInteraction: (() -> Void)?
     var onGestureRelease: ((Double) -> Void)?
@@ -16,7 +15,6 @@ final class KeyboardMonitor {
     private var burst = ShiftBurstGate(quietInterval: ConversionTiming.shiftQuiet)
     private var pendingDispatch: DispatchWorkItem?
     private(set) var inputGeneration: UInt64 = 0
-    private(set) var activityGeneration: UInt64 = 0
     private(set) var lastGestureRelease = ProcessInfo.processInfo.systemUptime
     private var modifiers = PhysicalModifierState()
     private static let modifierFlags: [UInt16: CGEventFlags] = [56: .maskShift, 60: .maskShift, 55: .maskCommand, 54: .maskCommand,
@@ -206,10 +204,6 @@ final class KeyboardMonitor {
         // Real key-down already invalidates the attempt. Listening for key-up
         // is needed only for our delivery receipt, not a second input change.
         if type == .keyUp { return }
-        activityGeneration &+= 1
-        // The listening tap does only local bookkeeping/invalidation; the
-        // callback dispatches AppKit work only when something is on screen.
-        onUserActivity?()
         // A second double tap is drained during the existing replacement.
         // Actual typing, clicks and other modifiers still cancel that attempt.
         if type != .flagsChanged || !triggerKeys.contains(key) {

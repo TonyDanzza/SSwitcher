@@ -6,15 +6,13 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
     private var timer: Timer?
     private let readStatus: () -> String
     private let runCheck: () -> Void
-    private let requestCapture: () -> Void
     private let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 100))
     private let fixtureStatus = NSTextField(labelWithString: "")
     private var fixtureNeighbors: (prefix: NSAttributedString, suffix: NSAttributedString)?
 
-    init(readStatus: @escaping () -> String, runCheck: @escaping () -> Void, requestCapture: @escaping () -> Void) {
+    init(readStatus: @escaping () -> String, runCheck: @escaping () -> Void) {
         self.readStatus = readStatus
         self.runCheck = runCheck
-        self.requestCapture = requestCapture
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 800),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Проверка SSwitcher"
@@ -67,8 +65,7 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         content.addArrangedSubview(fixtures)
         fixtureStatus.font = .systemFont(ofSize: 11)
         content.addArrangedSubview(fixtureStatus)
-        let actions = NSStackView(views: [NSButton(title: "Разрешить анимацию замены…", target: self, action: #selector(allowCapture)),
-                                         NSButton(title: "Скопировать диагностику", target: self, action: #selector(copyDiagnostics))])
+        let actions = NSStackView(views: [NSButton(title: "Скопировать диагностику", target: self, action: #selector(copyDiagnostics))])
         actions.orientation = .horizontal
         actions.spacing = 12
         content.addArrangedSubview(actions)
@@ -76,7 +73,6 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
         window.center()
     }
 
-    @objc private func allowCapture() { requestCapture() }
     @objc private func copyDiagnostics() { Self.copyReport(readStatus()) }
 
     /// The only explicit clipboard write: the user's "copy report" button.

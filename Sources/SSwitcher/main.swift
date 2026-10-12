@@ -57,21 +57,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            let wasConverting = self.editor.isConverting
             let changed = InputSources.sourceChanged()
             self.monitor.keyboardLayoutChanged()
             if changed { self.monitor.focusChanged() }
-            // A confirmed legacy replacement selects its target layout before
-            // revealing the image. Idle built-in-layout notices preserve that
-            // reveal; an active attempt still cancels.
-            if changed && wasConverting { self.editor.overlay.cancel() }
         }
         windowHotKeys.onMove = { [weak self] direction in
             guard let self else { return }
             self.refreshWindowShortcuts()
             guard self.windowHotKeys.isRegistered else { return }
             self.monitor.focusChanged()
-            self.editor.overlay.cancel()
             self.windowMoves.move(direction)
         }
         keepAwake.onChange = { [weak self] in self?.refreshStatusIcon(); self?.refreshSettingsStatus() }
@@ -91,13 +85,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.refreshWindowShortcuts()
             self?.refreshSettingsStatus()
             if self?.settingsWindow?.isVisible == true { self?.displayController.refresh() }
-        }
-        monitor.onUserActivity = { [weak self] in
-            guard let overlay = self?.editor.overlay, !overlay.isIdle else { return }
-            DispatchQueue.main.async { overlay.cancel() }
-            // Bare Shift taps are drained by the active MAX transaction. They
-            // must not expose its intermediate selection. Typing, clicks,
-            // scrolling and other modifiers cancel via onRealInput below.
         }
         monitor.onRealInput = { [weak self] in
             self?.editor.userInputChanged()
@@ -145,7 +132,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.lastResult = "Проверяю поле ввода…"
             let generation = self.monitor.inputGeneration
-            let activity = self.monitor.activityGeneration
             if let max = NSWorkspace.shared.frontmostApplication, MaxConversionRouter.isMax(max) {
                 self.editor.performance.cancelGesture()
                 self.maxRouter.convert(in: max, generation: generation)
@@ -153,8 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.editor.convertAtCursor(releaseTime: self.monitor.lastGestureRelease, isInputUnchanged: { [weak self] in
                 self?.monitor.inputGeneration == generation
-            }, isActivityUnchanged: { [weak self] in self?.monitor.activityGeneration == activity },
-               modifiersClear: { [weak self] in self?.monitor.physicalModifiersClear == true },
+            }, modifiersClear: { [weak self] in self?.monitor.physicalModifiersClear == true },
                observedModifiersClear: { [weak self] in self?.monitor.observedModifiersClear == true }) { [weak self] outcome in
                 guard let self else { return }
                 if case .unverified = outcome { self.monitor.conversionFinished(unverified: true) }
@@ -178,7 +163,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.monitor.focusChanged()
             self.nativeServices.cancelVisualShield()
             self.windowMoves.cancel()
-            self.editor.overlay.cancel()
             self.refreshPermissions()
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self.functionKeys.frontmostChanged(app)
@@ -249,7 +233,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         applyDoubleShiftSettings()
         applyMouseSettings()
-        if !settings.smoothReplacement { editor.overlay.cancel() }
         if !isRecordingShortcut {
             functionKeys.setShortcut(settings.functionKeyShortcut)
             keepAwake.setShortcut(settings.keepAwakeShortcut)
@@ -271,8 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshPermissions()
         if diagnosticsWindow == nil {
             diagnosticsWindow = DiagnosticsWindow(readStatus: { [weak self] in self?.diagnosticsText() ?? "" },
-                runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() },
-                requestCapture: { [weak self] in self?.requestScreenCapture() })
+                runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() })
         }
         diagnosticsWindow?.present(activateApplication: activateApplication)
     }
@@ -294,7 +276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             functionKeys.statusDescription,
             keepAwake.statusDescription,
             mouse.statusDescription,
-            editor.overlay.lastStatus,
             editor.performance.diagnosticStatus,
             nativeServices.conversionStatus
         ].joined(separator: "\n")

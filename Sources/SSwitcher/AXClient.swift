@@ -20,7 +20,6 @@ final class AXClient {
         var batch = true
         var valueWriteCapability: AXValueWriteCapability?
         var selectionSettable: Bool?
-        var geometrySupported: Bool?
     }
     private var capabilities = ExpiringCache<ElementKey, Capabilities>()
     private struct DocumentExtent { let rawValue: String; let length: Int }
@@ -31,8 +30,6 @@ final class AXClient {
         var rolePreparation = AXFocusPreparationDiagnostic()
     }
     private var manualAccessibility = ExpiringCache<String, ElectronPreparationResult>(capacity: 16)
-    private struct GeometryKey: Hashable { let element: ElementKey; let range: NSRange }
-    private var missingGeometry = ExpiringCache<GeometryKey, Bool>()
     private struct QtDisplaySnapshot: Equatable {
         let mainID: CGDirectDisplayID
         let bounds: [CGDirectDisplayID: CGRect]
@@ -57,7 +54,7 @@ final class AXClient {
     }
 
     func invalidate() { execution.submit { self.capabilities.removeAll(); self.manualAccessibility.removeAll(); self.documentExtents.removeAll() } }
-    func invalidateGeometry() { execution.submit { self.missingGeometry.removeAll(); self.documentExtents.removeAll() } }
+    func invalidateDocumentExtents() { execution.submit { self.documentExtents.removeAll() } }
 
     private func configured(_ element: AXUIElement) -> AXUIElement {
         // The timeout belongs to this AX object, not separately acquired equal
@@ -116,7 +113,7 @@ final class AXClient {
     private func spotlightFocus(_ field: AXUIElement, pid: pid_t, deadline: Double? = nil) -> AXSpotlightFocus? {
         guard let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
               bundleID == "com.apple.campo" else { return nil }
-        let deadline = deadline ?? ProcessInfo.processInfo.systemUptime + ConversionTiming.overlayFocusBudget
+        let deadline = deadline ?? ProcessInfo.processInfo.systemUptime + ConversionTiming.spotlightFocusBudget
         func read(_ node: AXUIElement, _ name: String) -> CFTypeRef? {
             guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
             let value = attribute(configured(node), name)
@@ -140,7 +137,7 @@ final class AXClient {
     }
 
     private func systemSpotlightMatches(_ original: AXSpotlightFocus, pid: pid_t) -> Bool {
-        let deadline = ProcessInfo.processInfo.systemUptime + ConversionTiming.overlayFocusBudget
+        let deadline = ProcessInfo.processInfo.systemUptime + ConversionTiming.spotlightFocusBudget
         let system = configured(AXUIElementCreateSystemWide())
         guard let focusedApp = element(attribute(system, kAXFocusedApplicationAttribute)),
               ProcessInfo.processInfo.systemUptime < deadline else { return false }
@@ -478,7 +475,7 @@ final class AXClient {
             valueWriteCapability = cached.valueWriteCapability
             valueEditable = valueWriteCapability?.allowsWrite == true
             selectionSettable = cached.selectionSettable == true
-            let fullySupported = cached.batch && cached.geometrySupported != false && (valueEditable || selectionSettable)
+            let fullySupported = cached.batch && (valueEditable || selectionSettable)
             capabilities.insert(cached, for: key, at: now, lifetime: fullySupported ? 30 : 3)
         }
         return AXEditorContext(application: application, policy: policy, focused: focused, element: candidate,
@@ -799,45 +796,6 @@ final class AXClient {
         // A target may apply the range after replying. The coordinator polls
         // the exact document/empty caret within its original fixed budget.
         return true
-    }
-
-    func bounds(_ context: AXEditorContext, range: NSRange) -> CGRect? {
-        guard context.spotlightFocus == nil || focusMatches(context) else { return nil }
-        guard let editor = context.element, range.length > 0 else { return nil }
-        let key = ElementKey(session: context.application.session, element: editor)
-        let now = ProcessInfo.processInfo.systemUptime
-        let geometryKey = GeometryKey(element: key, range: range)
-        guard missingGeometry.value(for: geometryKey, at: now) == nil else { return nil }
-        var cached = capabilities.value(for: key, at: now) ?? Capabilities()
-        guard cached.geometrySupported != false else { return nil }
-        func rectangle(_ range: NSRange) -> CGRect? {
-            var range = CFRange(location: range.location, length: range.length)
-            guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
-            var value: CFTypeRef?
-            let error = AXUIElementCopyParameterizedAttributeValue(editor, kAXBoundsForRangeParameterizedAttribute as CFString, parameter, &value)
-            if error == .parameterizedAttributeUnsupported || error == .attributeUnsupported {
-                cached.geometrySupported = false
-                capabilities.insert(cached, for: key, at: now, lifetime: 3)
-            }
-            guard error == .success, let value = AccessibilityValue.usable(value),
-                  CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetType(value as! AXValue) == .cgRect else { return nil }
-            var rect = CGRect.zero
-            return AXValueGetValue(value as! AXValue, .cgRect, &rect) ? rect : nil
-        }
-        guard let full = rectangle(range), full.minX.isFinite, full.minY.isFinite,
-              full.width.isFinite, full.height.isFinite, full.width > 1, full.width <= 900,
-              full.height >= 5, full.height <= 180 else {
-            missingGeometry.insert(true, for: geometryKey, at: now, lifetime: 2)
-            return nil
-        }
-        guard
-              let first = rectangle(NSRange(location: range.location, length: 1)),
-              let last = rectangle(NSRange(location: NSMaxRange(range) - 1, length: 1)),
-              first.width > 0, last.width > 0, abs(first.midY - last.midY) < 3,
-              full.insetBy(dx: -2, dy: -2).contains(first), full.insetBy(dx: -2, dy: -2).contains(last),
-              range.length == 1 || last.minX > first.minX else { return nil }
-        // A zero canvas range is a property of this request, not a blacklist.
-        return full
     }
 
 }

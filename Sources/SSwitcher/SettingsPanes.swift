@@ -99,7 +99,7 @@ struct SettingsPanes: View {
                            granted: status.accessibility, request: actions.requestAccessibility)
                 permission("Мониторинг ввода", "Замечать двойное нажатие клавиши. Текст не сохраняется и никуда не отправляется.",
                            granted: status.inputMonitoring, request: actions.requestInputMonitoring)
-                permission("Запись экрана", "Только для плавной замены: снимок поля на долю секунды. Можно не выдавать.",
+                permission("Запись экрана", "Только для MAX: снимок окна на долю секунды прикрывает выделение слова. Можно не выдавать.",
                            granted: status.screenCapture, request: actions.requestScreenCapture)
             } header: {
                 Text("Разрешения macOS")
@@ -161,14 +161,6 @@ struct SettingsPanes: View {
                 }
                 .disabled(!settings.conversionEnabled)
             } footer: { note("Сейчас: \(settings.triggerPhrase.lowercased()). Перед сменой клавиши SSwitcher проверит, не занято ли её двойное нажатие в macOS или запущенных программах.") }
-            Section {
-                Toggle("Плавная замена", isOn: $settings.smoothReplacement)
-                if settings.smoothReplacement && !status.screenCapture {
-                    LabeledContent("Нужна запись экрана") {
-                        Button("Разрешить…", action: actions.requestScreenCapture)
-                    }
-                }
-            } footer: { note("Старый текст плавно сменяется новым. Работает в редакторах, которые сообщают положение текста.") }
             Section {
                 ApplicationRows(ids: settings.excludedApplications) { id in
                     settings.excludedApplications.removeAll { $0 == id }

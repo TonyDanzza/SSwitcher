@@ -3,16 +3,14 @@ import os
 import SwitcherCore
 
 enum ConversionMetric: String, CaseIterable {
-    case total, gate, ax, capture, mutation, confirmation, reveal
+    case total, gate, ax, mutation, confirmation
     var title: String {
         switch self {
         case .total: return "До результата"
         case .gate: return "Пауза Shift"
         case .ax: return "AX"
-        case .capture: return "Снимок"
         case .mutation: return "Отправка"
         case .confirmation: return "Подтверждение"
-        case .reveal: return "Переход"
         }
     }
     var signpost: StaticString {
@@ -20,10 +18,8 @@ enum ConversionMetric: String, CaseIterable {
         case .total: return "GestureToResult"
         case .gate: return "GestureGate"
         case .ax: return "AXRead"
-        case .capture: return "Capture"
         case .mutation: return "Mutation"
         case .confirmation: return "ConfirmationWait"
-        case .reveal: return "Reveal"
         }
     }
 }
@@ -109,7 +105,6 @@ final class ConversionTrace {
         let now = ProcessInfo.processInfo.systemUptime
         let duration = metric == .total || metric == .gate ? max(0, now - release) : now - start
         durations[metric] = duration
-        if confirmed && metric == .reveal { recorder?.record(self, metric: metric, duration: duration) }
     }
     func addAX(_ duration: Double) { durations[.ax, default: 0] += duration }
     func finish(confirmed: Bool) {
@@ -117,7 +112,7 @@ final class ConversionTrace {
         finished = true
         self.confirmed = confirmed
         if confirmed { signposter.emitEvent("EditorAcknowledged", id: id) }
-        for metric in Array(intervals.keys) where metric != .reveal { end(metric) }
+        for metric in Array(intervals.keys) { end(metric) }
         if confirmed { for (metric, value) in durations { recorder?.record(self, metric: metric, duration: value) } }
     }
 }

@@ -1,4 +1,4 @@
-/// Readiness deadlines bound waits; only quiet/text-pacing/reveal intervals impose
+/// Readiness deadlines bound waits; only quiet and text-pacing intervals impose
 /// a delay. None of these timers run while the app is idle.
 enum ConversionTiming {
     // Services callbacks arrive before the requesting editor resumes its
@@ -12,7 +12,7 @@ enum ConversionTiming {
     static let electronPreparationBudget = 0.36
     static let canonicalDocumentBudget = 0.12
     static let attachmentScopeBudget = 0.12
-    static let overlayFocusBudget = 0.12
+    static let spotlightFocusBudget = 0.12
     static let qtFocusPreparationBudget = 0.6
     static let qtFocusProofBudget = 0.36
     static let canvasFocusPreparationBudget = 0.4
@@ -21,9 +21,7 @@ enum ConversionTiming {
     static let textPairInterval = 0.008
     static let eventDeliveryDeadline = 0.5
     static let modifierReleaseDeadline = 1.0
-    static let captureBudget = 0.055
-    static let revealDuration = 0.09
-    static let overlayWatchdog = 0.65
+    static let snapshotBudget = 0.2
     static let nativeVisualPresentationSettle = 0.034
     static let nativeVisualCommitSettle = 0.1
     static let nativeVisualWatchdog = 1.0

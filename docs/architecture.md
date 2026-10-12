@@ -12,7 +12,7 @@
 - `FunctionKeyController`: the top-row mode (pure rules in `FunctionKeyPolicy`); `GlobalHotKey` registers it and the keep-awake shortcut; `StatusHUD` confirms a shortcut.
 - `AppSettings`, `SettingsWindowController`, `SettingsPanes` and `ShortcutField`: stored choices and the Settings window (see below).
 - `KeepAwakeController`: one display-sleep power assertion with a timer and a battery stop (parsing and plurals in `KeepAwakeDuration`).
-- `DiagnosticsWindow`, `PerformanceRecorder` and `ReplacementOverlay`: status, bounded measurements and an optional visual transition for editors with reliable geometry.
+- `DiagnosticsWindow` and `PerformanceRecorder`: status and bounded measurements. `WindowSnapshot` takes the one in-memory screenshot behind the MAX visual shield.
 
 The app uses AppKit. External Accessibility reads are serialized off the main thread; own UI and Services callbacks stay on the main thread. The normal build includes no third-party dependencies or network behavior.
 
@@ -77,7 +77,7 @@ The original focused window, owner and display snapshot are revalidated before e
 
 ## Settings
 
-`AppSettings` keeps every choice in UserDefaults; keys from earlier builds (`paused`, `windowMovementDisabled`, `disableSmoothReplacement`, `functionKeyApplications`, `keepAwakeCustomMinutes`) keep their meaning. Each change calls one app handler that reconfigures the double-Shift detector (`keys`, `interval`), the Carbon shortcuts and the window shortcut registration. A cleared optional shortcut is stored as an empty dictionary so the default does not return.
+`AppSettings` keeps every choice in UserDefaults; keys from earlier builds (`paused`, `windowMovementDisabled`, `functionKeyApplications`, `keepAwakeCustomMinutes`) keep their meaning; `disableSmoothReplacement` is no longer read since the smooth transition was removed in build 183. Each change calls one app handler that reconfigures the double-Shift detector (`keys`, `interval`), the Carbon shortcuts and the window shortcut registration. A cleared optional shortcut is stored as an empty dictionary so the default does not return.
 
 The window is an AppKit `NSTabViewController` in toolbar style; each pane is a SwiftUI grouped `Form` in an `NSHostingController` with a fixed height. While it is visible the app switches to the regular activation policy (Dock, Command-Tab, a main menu with Edit commands) and a one-second timer refreshes `SettingsStatus` (permissions, displays, registration problems, results); closing returns to the accessory policy. While a shortcut field records, SSwitcher's own Carbon shortcuts are unregistered so the current combination can be recorded. `KeyShortcut` (SwitcherCore) rejects shortcuts without ⌃, ⌥ or ⌘ (except F13–F20) and reserved system combinations.
 

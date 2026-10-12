@@ -5,7 +5,7 @@ import SwitcherCore
 /// It changes no text and never holds input. Missing capture capability leaves
 /// the independently validated Services transaction unchanged.
 final class NativeWordVisualShield {
-    private let capture = ReplacementOverlay()
+    private let capture = WindowSnapshot()
     private var generation = 0
     private var image: ImageOverlay?
     private var removal: DispatchWorkItem?
@@ -45,7 +45,7 @@ final class NativeWordVisualShield {
         let epoch = generation
         preparationCompletion = completion
         started = ProcessInfo.processInfo.systemUptime
-        capture.prepare(bounds: bounds, padding: false, requiredMask: true, valid: valid) { [weak self] result in
+        capture.prepare(bounds: bounds, valid: valid) { [weak self] result in
             guard let self, self.generation == epoch else { return }
             switch result {
             case .ready(let image):

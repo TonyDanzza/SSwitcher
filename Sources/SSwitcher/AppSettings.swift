@@ -12,7 +12,6 @@ final class AppSettings: ObservableObject {
 
     // Double Shift
     @Published var conversionEnabled: Bool { didSet { save(!conversionEnabled, "paused") } }
-    @Published var smoothReplacement: Bool { didSet { save(!smoothReplacement, "disableSmoothReplacement") } }
     @Published var triggerKey: TriggerKey { didSet { save(triggerKey.rawValue, "doubleTapKey") } }
     /// Stored under the build 179 key, when only Shift could be chosen.
     @Published var triggerSide: TriggerSide { didSet { save(triggerSide.rawValue, "doubleShiftKeys") } }
@@ -51,7 +50,6 @@ final class AppSettings: ObservableObject {
     private init() {
         let d = UserDefaults.standard
         conversionEnabled = !d.bool(forKey: "paused")
-        smoothReplacement = !d.bool(forKey: "disableSmoothReplacement")
         triggerKey = TriggerKey(rawValue: d.integer(forKey: "doubleTapKey")) ?? .shift
         triggerSide = TriggerSide(rawValue: d.integer(forKey: "doubleShiftKeys")) ?? .any
         let interval = d.double(forKey: "doubleShiftInterval")

@@ -19,11 +19,10 @@ final class ConversionCoordinator {
     }
     private let ax = AXClient(policy: .remoteApplication)
     private let localAX = AXClient(policy: .localApplication)
-    let overlay = ReplacementOverlay()
     let performance = PerformanceRecorder()
     private var attempt: ConversionAttempt?
     private var unconfirmedInput: (() -> Bool)?
-    /// Geometry and document-extent caches are filled only by attempts, so
+    /// Document-extent caches are filled only by attempts, so
     /// input after an idle period has nothing to invalidate.
     private var attemptCachesFilled = false
     private(set) var diagnosticDetails = ""
@@ -39,8 +38,8 @@ final class ConversionCoordinator {
         unconfirmedInput = nil
         if attemptCachesFilled {
             attemptCachesFilled = false
-            ax.invalidateGeometry()
-            localAX.invalidateGeometry()
+            ax.invalidateDocumentExtents()
+            localAX.invalidateDocumentExtents()
         }
         cancel()
     }
@@ -54,7 +53,6 @@ final class ConversionCoordinator {
         KeyboardEvents.cancelDelivery()
         DispatchQueue.main.async { [weak self] in
             guard let self, self.attempt === attempt else { return }
-            self.overlay.cancel()
             self.finish(attempt, outcome: attempt.lifecycle.hasMutated ? .unverified : .cancelled)
         }
     }
@@ -68,12 +66,11 @@ final class ConversionCoordinator {
             attempt.cancellation.cancel()
             finish(attempt, outcome: attempt.lifecycle.hasMutated ? .unverified : .cancelled)
         }
-        overlay.cancel()
         performance.cancelGesture()
     }
 
     func convertAtCursor(releaseTime: Double, isInputUnchanged: @escaping () -> Bool,
-                         isActivityUnchanged: @escaping () -> Bool, modifiersClear: @escaping () -> Bool,
+                         modifiersClear: @escaping () -> Bool,
                          observedModifiersClear: @escaping () -> Bool,
                          completion: @escaping (Outcome) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -92,7 +89,7 @@ final class ConversionCoordinator {
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { completion(.failure("Нет активного приложения")); return }
         let trace = performance.startAttempt(release: releaseTime)
         let attempt = ConversionAttempt(frontmostPID: frontmost.processIdentifier, trace: trace,
-                                        unchanged: isInputUnchanged, activityUnchanged: isActivityUnchanged,
+                                        unchanged: isInputUnchanged,
                                         modifiersClear: modifiersClear, observedModifiersClear: observedModifiersClear,
                                         completion: completion)
         self.attempt = attempt
@@ -224,7 +221,7 @@ final class ConversionCoordinator {
         attempt.converted = conversion
         attempt.replacement = replacement
         diagnosticDetails = "\(attempt.selected ? "Выделение" : "Без выделения"): \(context.application.name)"
-        prepareOverlay(attempt, range: selection.range, text: selection.text)
+        validateBeforeMutation(attempt)
     }
 
     /// A second Shift gesture is drained, not queued as another replacement.
@@ -246,24 +243,6 @@ final class ConversionCoordinator {
         case .timedOut:
             diagnosticDetails += "; Shift не отпущен для возврата курсора"
             finish(attempt, outcome: .unverified)
-        }
-    }
-
-    private func prepareOverlay(_ attempt: ConversionAttempt, range: NSRange?, text: String) {
-        guard let context = attempt.context else { finish(attempt, outcome: .cancelled); return }
-        if text.contains("\n") || text.contains("\r") { overlay.skipMultiline(); validateBeforeMutation(attempt); return }
-        guard overlay.canCapture, let range else { validateBeforeMutation(attempt); return }
-        read(attempt, operation: { $0.bounds(context, range: range) }) { bounds in
-            attempt.trace.begin(.capture)
-            self.overlay.prepare(bounds: bounds, valid: { self.valid(attempt) && attempt.activityUnchanged() }) { result in
-                attempt.trace.end(.capture)
-                guard self.valid(attempt) else { self.finish(attempt, outcome: .cancelled); return }
-                switch result {
-                case .cancelled: self.finish(attempt, outcome: .cancelled)
-                case .skipped: self.validateBeforeMutation(attempt)
-                case .ready(let image): attempt.image = image; self.validateBeforeMutation(attempt)
-                }
-            }
         }
     }
 
@@ -346,7 +325,6 @@ final class ConversionCoordinator {
     private func reserveMutation(_ attempt: ConversionAttempt) -> Bool {
         guard valid(attempt, mutation: true), attempt.lifecycle.commitMutation() else { return false }
         attempt.phase = "mutation"
-        attempt.image?.show()
         attempt.trace.begin(.mutation)
         return true
     }
@@ -442,10 +420,6 @@ final class ConversionCoordinator {
         attempt.trace.end(.confirmation)
         attempt.trace.end(.total)
         InputSources.selectAfterConversion(conversion.target)
-        if let image = attempt.image {
-            attempt.trace.begin(.reveal)
-            image.reveal { attempt.trace.end(.reveal) }
-        }
         finish(attempt, outcome: .converted)
     }
 
@@ -476,8 +450,7 @@ final class ConversionCoordinator {
         attempt.cancellation.cancel()
         attempt.poll?.cancel(); attempt.poll = nil
         KeyboardEvents.cancelDelivery()
-        let confirmed: Bool
-        if case .converted = outcome { confirmed = true } else { confirmed = false; attempt.image?.close(); overlay.cancel() }
+        let confirmed: Bool = if case .converted = outcome { true } else { false }
         if case .unverified = outcome { unconfirmedInput = attempt.unchanged; diagnosticDetails += "; результат не подтверждён" }
         if case .cancelled = outcome { diagnosticDetails += "; отменено до ввода" }
         if let context = attempt.context {
@@ -520,7 +493,6 @@ private final class ConversionAttempt {
     let frontmostPID: pid_t
     let trace: ConversionTrace
     let unchanged: () -> Bool
-    let activityUnchanged: () -> Bool
     let modifiersClear: () -> Bool
     let observedModifiersClear: () -> Bool
     let completion: (ConversionCoordinator.Outcome) -> Void
@@ -541,14 +513,13 @@ private final class ConversionAttempt {
     var editingGuardPassed = false
     var usesNativeSearchValue = false
     var queryCaretRestored = false
-    var image: ImageOverlay?
     var readiness: ReadinessDeadline?
     var poll: DispatchWorkItem?
-    init(frontmostPID: pid_t, trace: ConversionTrace, unchanged: @escaping () -> Bool, activityUnchanged: @escaping () -> Bool,
+    init(frontmostPID: pid_t, trace: ConversionTrace, unchanged: @escaping () -> Bool,
          modifiersClear: @escaping () -> Bool, observedModifiersClear: @escaping () -> Bool,
          completion: @escaping (ConversionCoordinator.Outcome) -> Void) {
         self.frontmostPID = frontmostPID; self.trace = trace; self.unchanged = unchanged
-        self.activityUnchanged = activityUnchanged; self.modifiersClear = modifiersClear
+        self.modifiersClear = modifiersClear
         self.observedModifiersClear = observedModifiersClear; self.completion = completion
     }
 }
