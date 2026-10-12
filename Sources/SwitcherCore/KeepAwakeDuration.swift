@@ -79,14 +79,16 @@ public enum KeepAwakeDuration {
     }
 }
 
-/// On battery power, keeping the display awake stops below this charge.
+/// On battery power, keeping the display awake stops below a charge (20% by default).
 public enum KeepAwakeBatteryRule {
     public static let minimumPercent = 20
 
+    public static let percentRange = 10...50
+
     /// `percent` is nil on a Mac without a battery.
-    public static func allows(onBattery: Bool, percent: Int?) -> Bool {
+    public static func allows(onBattery: Bool, percent: Int?, minimum: Int = minimumPercent) -> Bool {
         guard onBattery, let percent else { return true }
-        return percent >= minimumPercent
+        return percent >= minimum
     }
 }
 

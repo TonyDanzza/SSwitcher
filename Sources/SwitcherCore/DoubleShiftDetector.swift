@@ -2,6 +2,9 @@
 /// Times are monotonic seconds; no typed text is retained.
 public struct DoubleShiftDetector {
     public var interval: Double = 0.3
+    /// 56 is the left Shift, 60 the right one. A tap of a key outside this set
+    /// never counts and breaks a pending pair.
+    public var keys: Set<UInt16> = [56, 60]
     private var heldKeys: Set<UInt16> = []
     private var pressTime: Double?
     private var previousTap: (key: UInt16, time: Double)?
@@ -50,7 +53,7 @@ public struct DoubleShiftDetector {
         let startedAt = pressTime
         heldKeys.removeAll()
         pressTime = nil
-        guard isSingleRelease, !otherModifierDown, let startedAt,
+        guard keys.contains(key), isSingleRelease, !otherModifierDown, let startedAt,
               time >= startedAt, time - startedAt <= interval else {
             previousTap = nil
             return false

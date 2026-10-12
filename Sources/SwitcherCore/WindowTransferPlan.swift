@@ -46,22 +46,21 @@ public struct WindowTransferPlan: Equatable {
         }
         guard let source = ranked.first, area(window.intersection(source.frame)) > 0 else { return .invalidGeometry }
         let candidates = displays.filter { $0.id != source.id }.compactMap { destination -> (WindowDisplay, Bool, CGFloat, CGFloat, CGFloat)? in
-            let edgeGap: CGFloat, overlap: CGFloat, perpendicularGap: CGFloat, centerOffset: CGFloat
+            let edgeGap = Self.edgeGap(from: source.frame, to: destination.frame, direction: direction)
+            let overlap: CGFloat, perpendicularGap: CGFloat, centerOffset: CGFloat
             switch direction {
             case .left, .right:
-                edgeGap = direction == .left ? source.frame.minX - destination.frame.maxX : destination.frame.minX - source.frame.maxX
                 overlap = min(source.frame.maxY, destination.frame.maxY) - max(source.frame.minY, destination.frame.minY)
                 perpendicularGap = max(0, -overlap)
                 centerOffset = abs(source.frame.midY - destination.frame.midY)
             case .up, .down:
-                edgeGap = direction == .up ? source.frame.minY - destination.frame.maxY : destination.frame.minY - source.frame.maxY
                 overlap = min(source.frame.maxX, destination.frame.maxX) - max(source.frame.minX, destination.frame.minX)
                 perpendicularGap = max(0, -overlap)
                 centerOffset = abs(source.frame.midX - destination.frame.midX)
             }
             // Centers alone would wrongly make the narrow display below a
             // possible left/right target. Require the requested physical edge.
-            guard edgeGap >= -0.01 else { return nil }
+            guard Self.isBeyondEdge(edgeGap) else { return nil }
             return (destination, overlap > 0, max(0, edgeGap), perpendicularGap, centerOffset)
         }.sorted {
             if $0.1 != $1.1 { return $0.1 }
@@ -98,6 +97,18 @@ public struct WindowTransferPlan: Equatable {
         guard valid(result), newWork.insetBy(dx: -0.5, dy: -0.5).contains(result) else { return .invalidGeometry }
         return .move(Self(sourceID: source.id, destinationID: destination.id, frame: result, needsResize: resize))
     }
+
+    /// Distance from the source's edge in `direction` to the destination's
+    /// facing edge; negative when the destination does not lie beyond it.
+    public static func edgeGap(from source: CGRect, to destination: CGRect, direction: WindowMoveDirection) -> CGFloat {
+        switch direction {
+        case .left: return source.minX - destination.maxX
+        case .right: return destination.minX - source.maxX
+        case .up: return source.minY - destination.maxY
+        case .down: return destination.minY - source.maxY
+        }
+    }
+    static func isBeyondEdge(_ gap: CGFloat) -> Bool { gap >= -0.01 }
 
     private static func area(_ rect: CGRect) -> CGFloat { rect.isNull || rect.isEmpty ? 0 : rect.width * rect.height }
     private static func relative(_ offset: CGFloat, available: CGFloat) -> CGFloat {
