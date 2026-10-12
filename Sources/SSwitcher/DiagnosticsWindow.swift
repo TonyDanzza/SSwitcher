@@ -93,8 +93,11 @@ final class DiagnosticsWindow: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func allowCapture() { requestCapture() }
-    @objc private func copyDiagnostics() {
-        let report = "SSwitcher \(DiagnosticReports.version)\nmacOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" + readStatus()
+    @objc private func copyDiagnostics() { Self.copyReport(readStatus()) }
+
+    /// The only explicit clipboard write: the user's "copy report" button.
+    static func copyReport(_ status: String) {
+        let report = "SSwitcher \(DiagnosticReports.version)\nmacOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" + status
         NSPasteboard.general.clearContents()
         if !NSPasteboard.general.setString(report, forType: .string) { NSSound.beep() }
     }

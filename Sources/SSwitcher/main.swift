@@ -14,8 +14,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwakeController()
     private let nativeServices = NativeServiceProvider()
     private lazy var maxRouter = MaxConversionRouter(monitor: monitor, services: nativeServices)
-    private var windowMovementEnabled = !UserDefaults.standard.bool(forKey: "windowMovementDisabled")
-    private var enabled = !UserDefaults.standard.bool(forKey: "paused")
+    private let settings = AppSettings.shared
+    private let settingsStatus = SettingsStatus()
+    private var settingsWindow: SettingsWindowController?
+    private var settingsTimer: Timer?
+    private var isRecordingShortcut = false
+    private var appliedConversionEnabled = AppSettings.shared.conversionEnabled
+    private var windowMovementEnabled: Bool { settings.windowMovementEnabled }
+    private var enabled: Bool { settings.conversionEnabled }
     private var lastAttempt = "Ещё не срабатывал"
     private var lastResult = "Ожидание двойного Shift"
     private var activationObserver: NSObjectProtocol?
@@ -61,8 +67,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.editor.overlay.cancel()
             self.windowMoves.move(direction)
         }
-        keepAwake.onChange = { [weak self] in self?.refreshStatusIcon() }
-        functionKeys.start()
+        keepAwake.onChange = { [weak self] in self?.refreshStatusIcon(); self?.refreshSettingsStatus() }
+        functionKeys.start(shortcut: settings.functionKeyShortcut)
+        keepAwake.setShortcut(settings.keepAwakeShortcut)
+        settings.onChange = { [weak self] in self?.settingsChanged() }
+        applyDoubleShiftSettings()
+        AppMainMenu.install(target: self, settings: #selector(showSettings), about: #selector(showAbout))
         windowMoves.onResult = { [weak self] in
             guard let self else { return }
             self.statusItem.button?.toolTip = self.windowMoves.lastResult
@@ -70,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             self?.nativeServices.cancelVisualShield()
             self?.refreshWindowShortcuts()
+            self?.refreshSettingsStatus()
         }
         monitor.onUserActivity = { [weak self] in
             guard let overlay = self?.editor.overlay, !overlay.isIdle else { return }
@@ -105,10 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         maxRouter.restoreWindowShortcuts = { [weak self] in self?.refreshWindowShortcuts() }
         monitor.canStartConversion = { [weak self] in
-            self?.enabled == true && self?.editor.isConverting == false && self?.maxRouter.isConverting == false
+            self?.enabled == true && self?.editor.isConverting == false && self?.maxRouter.isConverting == false &&
+                self?.settings.isExcluded(NSWorkspace.shared.frontmostApplication) == false
         }
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled, !self.editor.isConverting, !self.maxRouter.isConverting,
+                  !self.settings.isExcluded(NSWorkspace.shared.frontmostApplication),
                   self.monitor.claimConversion() else { return }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             // Keep a leftover experimental source from running beside legacy
@@ -143,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .unverified: self.lastResult = "Результат замены не подтверждён; проверьте текст и выделите его заново"
                 case .failure(let message):
                     self.lastResult = message
-                    NSSound.beep()
+                    if self.settings.beepOnFailure { NSSound.beep() }
                 }
                 self.statusItem.button?.toolTip = self.lastResult
             }
@@ -217,70 +230,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func refreshWindowShortcuts() {
-        let frames = NSScreen.screens.map(\.frame).reduce(into: [CGRect]()) { unique, frame in
+    /// Arrows follow the display arrangement unless Settings choose them;
+    /// nothing registers with one display, so every arrow keeps its meaning.
+    private var windowShortcutDirections: Set<WindowMoveDirection> {
+        WindowShortcutDirections.resolve(settings.windowDirectionChoice, displays: WindowMoveController.currentDisplays())
+    }
+
+    private var displayCount: Int {
+        NSScreen.screens.map(\.frame).reduce(into: [CGRect]()) { unique, frame in
             if !unique.contains(frame) { unique.append(frame) }
-        }
+        }.count
+    }
+
+    private func refreshWindowShortcuts() {
+        let directions = windowShortcutDirections
         if windowMovementEnabled && !nativeServices.isConverting && AXIsProcessTrusted() &&
-            CGPreflightListenEventAccess() && monitor.isRunning && frames.count >= 2 {
-            windowHotKeys.start()
+            CGPreflightListenEventAccess() && monitor.isRunning && displayCount >= 2 && !directions.isEmpty {
+            windowHotKeys.start(directions: directions, modifiers: settings.windowModifiers)
         } else {
             windowHotKeys.stop()
             windowMoves.cancel()
         }
     }
 
+    /// Why window shortcuts are not registered, or nil when they work.
+    private var windowShortcutWaitingReason: String? {
+        guard windowMovementEnabled, !windowHotKeys.isRegistered else { return nil }
+        if !AXIsProcessTrusted() { return "Нужен Универсальный доступ" }
+        if !CGPreflightListenEventAccess() { return "Нужен Мониторинг ввода" }
+        if !monitor.isRunning { return "Слежение за вводом не запущено" }
+        if displayCount < 2 { return "Ждёт второго дисплея" }
+        if windowShortcutDirections.isEmpty { return "Стрелки не выбраны" }
+        if windowHotKeys.lastError != nil { return "Сочетания заняты другой программой" }
+        return nil
+    }
+
+    /// Short by design (HIG menu bar extras): problems, frequent toggles,
+    /// Settings and Quit. Everything else lives in Settings.
     private func rebuildMenu() {
         guard let menu = statusItem.menu else { return }
         menu.removeAllItems()
-        add("SSwitcher \(DiagnosticReports.version)", to: menu)
-        add("Раскладка: \(InputSources.currentName)", to: menu)
-        add(enabled ? (monitor.isRunning && AXIsProcessTrusted() ? "Двойной Shift включён" : "Нужны разрешения macOS") : "На паузе", to: menu)
-        menu.addItem(.separator())
-        add("Двойной Shift: выделение или слово при курсоре в его конце", to: menu)
-        add("Последний двойной Shift: \(lastAttempt)", to: menu)
-        add(lastResult, to: menu)
+        let problems = menuProblems
+        for (title, tab) in problems {
+            let item = add(title, action: #selector(openSettingsTab(_:)), to: menu)
+            item.tag = tab.rawValue
+            item.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "Внимание")
+        }
+        if !problems.isEmpty { menu.addItem(.separator()) }
         let toggle = add("Исправлять по двойному Shift", action: #selector(toggleEnabled), to: menu)
         toggle.state = enabled ? .on : .off
-        let smooth = add("Плавная замена", action: #selector(toggleSmoothReplacement), to: menu)
-        smooth.state = ReplacementOverlay.enabled ? .on : .off
-        if !CGPreflightScreenCaptureAccess() {
-            add("Разрешить запись экрана для плавной замены…", action: #selector(requestScreenCapture), to: menu)
+        let registered = windowHotKeys.isRegistered ? windowHotKeys.directions : []
+        let title = registered.isEmpty ? "Переносить окна"
+            : "Переносить окна: \(windowHotKeys.modifiers.symbols)\(WindowShortcutDirections.arrows(registered))"
+        let windows = add(title, action: #selector(toggleWindowMovement), to: menu)
+        windows.state = windowMovementEnabled ? .on : .off
+        if let reason = windowShortcutWaitingReason {
+            if #available(macOS 14.4, *) { windows.subtitle = reason } else { windows.toolTip = reason }
         }
-        if !monitor.isRunning && (enabled || windowMovementEnabled) {
-            add("Разрешить мониторинг ввода…", action: #selector(requestPermission), to: menu)
-        }
-        if !AXIsProcessTrusted() {
-            add("Разрешить универсальный доступ…", action: #selector(requestAccessibility), to: menu)
-        }
-        menu.addItem(.separator())
-        let windowToggle = add("Переносить окно: ⌥⇧ + стрелки", action: #selector(toggleWindowMovement), to: menu)
-        windowToggle.state = windowMovementEnabled ? .on : .off
-        windowToggle.toolTip = "Выключите, чтобы Option+Shift+стрелки снова выделяли текст"
-        if windowMovementEnabled && !windowHotKeys.isRegistered {
-            if !AXIsProcessTrusted() { add("Для переноса нужен Универсальный доступ", to: menu) }
-            else if !CGPreflightListenEventAccess() { add("Для переноса нужен Мониторинг ввода", to: menu) }
-            else if !monitor.isRunning { add("Слежение за вводом не запущено", to: menu) }
-            else if NSScreen.screens.map(\.frame).reduce(into: [CGRect](), { if !$0.contains($1) { $0.append($1) } }).count < 2 { add("Перенос ждёт второго дисплея", to: menu) }
-            else if windowHotKeys.lastError != nil { add("Горячие клавиши переноса недоступны", to: menu) }
-            else { add("Перенос ждёт второго дисплея", to: menu) }
-        }
-        menu.addItem(.separator())
-        for item in functionKeys.menuItems(frontmost: NSWorkspace.shared.frontmostApplication) { menu.addItem(item) }
-        menu.addItem(.separator())
+        menu.addItem(functionKeys.menuItem())
         for item in keepAwake.menuItems() { menu.addItem(item) }
         menu.addItem(.separator())
-        let login = add("Запускать при входе в macOS", action: #selector(toggleLoginAtLaunch), to: menu)
-        login.state = loginAtLaunch.state
-        login.isEnabled = !loginAtLaunch.isChanging
-        login.toolTip = loginAtLaunch.statusDescription
-        if loginAtLaunch.state == .mixed {
-            add("Подтвердить автозапуск в настройках macOS…", action: #selector(openLoginSettings), to: menu)
+        let settingsItem = add("Настройки…", action: #selector(showSettings), to: menu)
+        settingsItem.keyEquivalent = ","
+        let quit = add("Завершить SSwitcher", action: #selector(quit), to: menu)
+        quit.keyEquivalent = "q"
+    }
+
+    /// One line per problem; each opens the Settings pane that fixes it.
+    private var menuProblems: [(String, SettingsTab)] {
+        var problems: [(String, SettingsTab)] = []
+        if (enabled || windowMovementEnabled) && (!monitor.isRunning || !AXIsProcessTrusted()) {
+            problems.append(("Нужны разрешения macOS…", .permissions))
         }
-        if let error = loginAtLaunch.lastError { add(error, to: menu) }
-        menu.addItem(.separator())
-        add("Проверить работу…", action: #selector(showDiagnostics), to: menu)
-        add("Завершить SSwitcher", action: #selector(quit), to: menu)
+        if windowMovementEnabled, windowHotKeys.lastError != nil, !windowHotKeys.isRegistered, displayCount >= 2,
+           AXIsProcessTrusted(), monitor.isRunning {
+            problems.append(("Сочетания переноса окон заняты…", .windows))
+        }
+        if functionKeys.isShortcutBlocked, let shortcut = functionKeys.shortcut {
+            problems.append(("Сочетание \(KeyNames.string(shortcut)) занято…", .keyboard))
+        }
+        if functionKeys.lastError != nil { problems.append(("Верхний ряд не переключается…", .keyboard)) }
+        if keepAwake.isShortcutBlocked, let shortcut = settings.keepAwakeShortcut {
+            problems.append(("Сочетание \(KeyNames.string(shortcut)) занято…", .keepAwake))
+        }
+        return problems
     }
 
     @discardableResult
@@ -291,21 +324,131 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    @objc private func toggleEnabled() {
-        enabled.toggle()
-        UserDefaults.standard.set(!enabled, forKey: "paused")
-        monitor.focusChanged()
+    @objc private func toggleEnabled() { settings.conversionEnabled.toggle() }
+    @objc private func toggleWindowMovement() { settings.windowMovementEnabled.toggle() }
+
+    private func applyDoubleShiftSettings() {
+        monitor.configureDoubleShift(keys: settings.doubleShiftKeys.keys, interval: settings.doubleShiftInterval)
+    }
+
+    /// Applies any Settings change: listener, shortcuts, typed-word tracking.
+    private func settingsChanged() {
+        if appliedConversionEnabled != settings.conversionEnabled {
+            appliedConversionEnabled = settings.conversionEnabled
+            monitor.focusChanged()
+        }
+        applyDoubleShiftSettings()
+        if !settings.smoothReplacement { editor.overlay.cancel() }
+        if !isRecordingShortcut {
+            functionKeys.setShortcut(settings.functionKeyShortcut)
+            keepAwake.setShortcut(settings.keepAwakeShortcut)
+        }
         refreshTypedWordTracking()
         refreshPermissions()
+        refreshSettingsStatus()
         rebuildMenu()
     }
 
-    @objc private func toggleWindowMovement() {
-        windowMovementEnabled.toggle()
-        UserDefaults.standard.set(!windowMovementEnabled, forKey: "windowMovementDisabled")
-        refreshPermissions()
-        rebuildMenu()
+    // MARK: Settings window
+
+    @objc private func showSettings() { presentSettings(nil) }
+    /// The standard About panel, with the source link in its credits.
+    @objc private func showAbout() {
+        let credits = NSMutableAttributedString(string: "Двойной Shift исправляет раскладку, окна переезжают между дисплеями, верхний ряд и сон Mac под рукой.\n\n",
+            attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.secondaryLabelColor])
+        credits.append(NSAttributedString(string: "Исходный код на GitHub", attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .link: URL(string: "https://github.com/TonyDanzza/SSwitcher") as Any]))
+        let centered = NSMutableParagraphStyle()
+        centered.alignment = .center
+        credits.addAttribute(.paragraphStyle, value: centered, range: NSRange(location: 0, length: credits.length))
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
+    @objc private func openSettingsTab(_ sender: NSMenuItem) { presentSettings(SettingsTab(rawValue: sender.tag)) }
+
+    private func presentSettings(_ tab: SettingsTab?) {
+        refreshPermissions()
+        if settingsWindow == nil {
+            let actions = SettingsActions(
+                requestAccessibility: { [weak self] in self?.requestAccessibility() },
+                requestInputMonitoring: { [weak self] in self?.requestPermission() },
+                requestScreenCapture: { [weak self] in self?.requestScreenCapture() },
+                toggleLogin: { [weak self] in self?.toggleLoginAtLaunch() },
+                openLoginSettings: { [weak self] in self?.openLoginSettings() },
+                openTestWindow: { [weak self] in self?.presentDiagnostics(activateApplication: true) },
+                copyReport: { [weak self] in self?.copyReport() },
+                stopKeepAwake: { [weak self] in self?.keepAwake.stop() },
+                recordingShortcut: { [weak self] recording in self?.recordingShortcut(recording) })
+            let window = SettingsWindowController(settings: settings, status: settingsStatus, functionKeys: functionKeys, actions: actions)
+            window.onVisibilityChange = { [weak self] visible in self?.settingsVisibilityChanged(visible) }
+            settingsWindow = window
+        }
+        refreshSettingsStatus()
+        settingsWindow?.show(tab)
+    }
+
+    /// While Settings are open SSwitcher sits in the Dock and Command-Tab, so
+    /// the window cannot get lost behind others; closing returns it to the menu bar.
+    private func settingsVisibilityChanged(_ visible: Bool) {
+        settingsTimer?.invalidate(); settingsTimer = nil
+        if visible {
+            NSApp.setActivationPolicy(.regular)
+            settingsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                self?.refreshPermissions(startRetry: false)
+                self?.refreshSettingsStatus()
+            }
+            settingsTimer?.tolerance = 0.3
+        } else {
+            if isRecordingShortcut { recordingShortcut(false) }
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    private func recordingShortcut(_ recording: Bool) {
+        isRecordingShortcut = recording
+        if recording {
+            functionKeys.setShortcut(nil)
+            keepAwake.setShortcut(nil)
+        } else {
+            functionKeys.setShortcut(settings.functionKeyShortcut)
+            keepAwake.setShortcut(settings.keepAwakeShortcut)
+            refreshSettingsStatus()
+        }
+    }
+
+    private func refreshSettingsStatus() {
+        guard settingsWindow?.isVisible == true else { return }
+        let status = settingsStatus
+        func set<T: Equatable>(_ path: ReferenceWritableKeyPath<SettingsStatus, T>, _ value: T) {
+            if status[keyPath: path] != value { status[keyPath: path] = value }
+        }
+        set(\.accessibility, AXIsProcessTrusted())
+        set(\.inputMonitoring, CGPreflightListenEventAccess())
+        set(\.screenCapture, CGPreflightScreenCaptureAccess())
+        set(\.loginStatus, loginAtLaunch.status)
+        set(\.loginChanging, loginAtLaunch.isChanging)
+        set(\.loginError, loginAtLaunch.lastError)
+        let main = NSScreen.screens.first
+        set(\.displays, NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return SettingsStatus.Display(id: number.uint32Value, name: screen.localizedName, frame: screen.frame, isMain: screen == main)
+        })
+        set(\.availableDirections, WindowShortcutDirections.available(in: WindowMoveController.currentDisplays()))
+        set(\.registeredDirections, windowHotKeys.isRegistered ? windowHotKeys.directions : [])
+        set(\.windowShortcutProblem, windowShortcutWaitingReason.flatMap { $0 == "Ждёт второго дисплея" ? nil : $0 })
+        set(\.lastWindowResult, windowMoves.lastResult)
+        set(\.functionShortcutBlocked, !isRecordingShortcut && functionKeys.isShortcutBlocked)
+        set(\.keepAwakeShortcutBlocked, !isRecordingShortcut && keepAwake.isShortcutBlocked)
+        set(\.keepAwakeActive, keepAwake.isActive)
+        set(\.keepAwakeStatus, keepAwake.statusDescription)
+        set(\.hasBattery, keepAwake.hasBattery)
+        set(\.lastAttempt, lastAttempt)
+        set(\.lastResult, lastResult)
+        set(\.diagnostics, diagnosticsText())
+    }
+
+    private func copyReport() { DiagnosticsWindow.copyReport(diagnosticsText()) }
 
     @objc private func requestPermission() {
         if !CGPreflightListenEventAccess() { CGRequestListenEventAccess() }
@@ -316,13 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
-    @objc private func toggleSmoothReplacement() {
-        ReplacementOverlay.enabled.toggle()
-        if !ReplacementOverlay.enabled { editor.overlay.cancel() }
-        rebuildMenu()
-    }
-
-    @objc private func requestScreenCapture() {
+    private func requestScreenCapture() {
         if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
         if !CGPreflightScreenCaptureAccess(),
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
@@ -337,9 +474,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loginAtLaunch.toggle { [weak self] in
             guard let self else { return }
             self.statusItem.button?.toolTip = self.loginAtLaunch.lastError ?? self.loginAtLaunch.statusDescription
-            self.rebuildMenu()
+            self.refreshSettingsStatus()
         }
-        rebuildMenu()
+        refreshSettingsStatus()
     }
     @objc private func openLoginSettings() { loginAtLaunch.openSettings() }
 
@@ -350,31 +487,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func presentDiagnostics(activateApplication: Bool) {
         refreshPermissions()
         if diagnosticsWindow == nil {
-            diagnosticsWindow = DiagnosticsWindow(readStatus: { [weak self] in
-                guard let self else { return "" }
-                return [
-                    "Универсальный доступ: \(AXIsProcessTrusted() ? "разрешён" : "не выдан")",
-                    "Мониторинг ввода: \(CGPreflightListenEventAccess() ? "разрешён" : "не выдан")",
-                    "Отправка клавиш: \(CGPreflightPostEventAccess() ? "разрешена" : "не разрешена")",
-                    "Слежение за клавишами: \(self.monitor.isRunning ? "работает" : "не запущено")",
-                    "Событий Shift: \(self.monitor.shiftEventCount); двойных нажатий: \(self.monitor.doubleShiftCount)",
-                    "Синтетических событий клавиатуры: \(self.monitor.syntheticEventCount)",
-                    self.loginAtLaunch.statusDescription,
-                    "Последняя попытка: \(self.lastAttempt)",
-                    self.lastResult,
-                    self.editor.diagnosticDetails,
-                    self.windowMoves.lastResult,
-                    self.windowMoves.lastDetails,
-                    self.functionKeys.statusDescription,
-                    self.keepAwake.statusDescription,
-                    self.editor.overlay.lastStatus,
-                    self.editor.performance.diagnosticStatus,
-                    self.nativeServices.conversionStatus
-                ].joined(separator: "\n")
-            }, runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() },
-               requestCapture: { [weak self] in self?.requestScreenCapture() })
+            diagnosticsWindow = DiagnosticsWindow(readStatus: { [weak self] in self?.diagnosticsText() ?? "" },
+                runCheck: { [weak self] in self?.monitor.triggerForDiagnostics() },
+                requestCapture: { [weak self] in self?.requestScreenCapture() })
         }
         diagnosticsWindow?.present(activateApplication: activateApplication)
+    }
+
+    private func diagnosticsText() -> String {
+        [
+            "Универсальный доступ: \(AXIsProcessTrusted() ? "разрешён" : "не выдан")",
+            "Мониторинг ввода: \(CGPreflightListenEventAccess() ? "разрешён" : "не выдан")",
+            "Отправка клавиш: \(CGPreflightPostEventAccess() ? "разрешена" : "не разрешена")",
+            "Слежение за клавишами: \(monitor.isRunning ? "работает" : "не запущено")",
+            "Событий Shift: \(monitor.shiftEventCount); двойных нажатий: \(monitor.doubleShiftCount)",
+            "Синтетических событий клавиатуры: \(monitor.syntheticEventCount)",
+            loginAtLaunch.statusDescription,
+            "Последняя попытка: \(lastAttempt)",
+            lastResult,
+            editor.diagnosticDetails,
+            windowMoves.lastResult,
+            windowMoves.lastDetails,
+            functionKeys.statusDescription,
+            keepAwake.statusDescription,
+            editor.overlay.lastStatus,
+            editor.performance.diagnosticStatus,
+            nativeServices.conversionStatus
+        ].joined(separator: "\n")
     }
 
     @objc private func requestAccessibility() {
@@ -394,6 +533,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowMoves.cancel()
         functionKeys.restoreBase()
         keepAwake.stop()
+        keepAwake.setShortcut(nil)
+        settingsTimer?.invalidate()
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }

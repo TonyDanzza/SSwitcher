@@ -7,12 +7,11 @@ import SwitcherCore
 /// (System Settings → Keyboard), written together with the live IOHIDSystem
 /// parameter. Application rules change only the live parameter while the
 /// application is frontmost, so the preference always holds the base mode.
-final class FunctionKeyController: NSObject {
+final class FunctionKeyController: NSObject, ObservableObject {
     var onChange: (() -> Void)?
-    private(set) var policy: FunctionKeyPolicy
-    private(set) var lastError: String?
-    private let hotKey = FunctionKeyHotKey()
-    private let hud = StatusHUD()
+    @Published private(set) var policy: FunctionKeyPolicy
+    @Published private(set) var lastError: String?
+    private let hotKey = GlobalHotKey(signature: 0x5353464E) // SSFN
     private static let rulesKey = "functionKeyApplications"
     private static let preferenceKey = "com.apple.keyboard.fnState" as CFString
 
@@ -23,9 +22,18 @@ final class FunctionKeyController: NSObject {
         hotKey.onPress = { [weak self] in self?.shortcutPressed() }
     }
 
-    func start() {
-        hotKey.start()
+    var shortcut: KeyShortcut? { hotKey.shortcut }
+    var isShortcutBlocked: Bool { hotKey.isBlocked }
+
+    func start(shortcut: KeyShortcut?) {
+        hotKey.start(shortcut)
         frontmostChanged()
+    }
+
+    /// nil removes the shortcut (also while Settings records a new one).
+    func setShortcut(_ shortcut: KeyShortcut?) {
+        hotKey.start(shortcut)
+        objectWillChange.send()
     }
 
     /// Reapplies after an application switch. A change made in System
@@ -44,77 +52,47 @@ final class FunctionKeyController: NSObject {
     var statusDescription: String {
         let live = Self.live.map(Self.title) ?? "не прочитан"
         let rules = policy.applications.isEmpty ? "" : "; свой режим у программ: \(policy.applications.count)"
-        let shortcut = hotKey.isRegistered ? "⌃⌥⌘F работает" : "⌃⌥⌘F не зарегистрировано"
+        let shortcut: String
+        if let value = hotKey.shortcut { shortcut = KeyNames.string(value) + (hotKey.isRegistered ? " работает" : " не зарегистрировано") }
+        else { shortcut = "сочетание не задано" }
         return "Верхний ряд: \(live) (везде: \(Self.title(policy.base))\(rules)); \(shortcut)" + (lastError.map { "; \($0)" } ?? "")
     }
 
-    // MARK: Menu
+    // MARK: Settings
 
-    func menuItems(frontmost app: NSRunningApplication?) -> [NSMenuItem] {
-        var items: [NSMenuItem] = []
-        let main = item("F1–F12 без fn", action: #selector(toggleBase))
-        main.state = policy.base == .standard ? .on : .off
-        main.keyEquivalent = "f"
-        main.keyEquivalentModifierMask = [.control, .option, .command]
-        main.toolTip = "Включено: F1–F12 работают сами, яркость и звук — с fn. Выключено: наоборот. ⌃⌥⌘F переключает режим в текущей программе"
-        items.append(main)
-        if let id = Self.bundleID(app) {
-            let name = Self.name(of: id, fallback: app?.localizedName)
-            let parent = item("Для «\(name)»: \(policy.rule(for: id).map(Self.title) ?? "как везде")")
-            let submenu = NSMenu()
-            let rule = policy.rule(for: id)
-            for (title, mode) in [("Как везде", nil), ("F1–F12 без fn", FunctionKeyMode.standard), ("Яркость и звук без fn", .media)] {
-                let choice = item(title, action: #selector(chooseRule(_:)))
-                choice.representedObject = RuleChoice(bundleID: id, mode: mode)
-                choice.state = rule == mode ? .on : .off
-                submenu.addItem(choice)
-            }
-            parent.submenu = submenu
-            items.append(parent)
-        }
-        if !policy.applications.isEmpty {
-            let parent = item("Свой режим у программ: \(policy.applications.count)")
-            let submenu = NSMenu()
-            let rules = policy.applications.map { (id: $0.key, name: Self.name(of: $0.key), mode: $0.value) }
-            for (id, name, mode) in rules.sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) {
-                let row = item("\(name): \(Self.title(mode))", action: #selector(chooseRule(_:)))
-                row.representedObject = RuleChoice(bundleID: id, mode: nil)
-                row.toolTip = "Нажмите, чтобы программа снова работала как везде"
-                submenu.addItem(row)
-            }
-            submenu.addItem(.separator())
-            submenu.addItem(item("Нажмите программу, чтобы убрать её режим"))
-            parent.submenu = submenu
-            items.append(parent)
-        }
-        if !hotKey.isRegistered { items.append(item("⌃⌥⌘F занято другой программой")) }
-        if let lastError { items.append(item(lastError)) }
-        return items
+    var baseMode: FunctionKeyMode {
+        get { policy.base }
+        set { setBase(newValue) }
     }
 
-    private final class RuleChoice: NSObject {
-        let bundleID: String, mode: FunctionKeyMode?
-        init(bundleID: String, mode: FunctionKeyMode?) { self.bundleID = bundleID; self.mode = mode }
+    /// Rules sorted by application name, for the Settings table.
+    var rules: [(id: String, name: String, mode: FunctionKeyMode)] {
+        policy.applications.map { (id: $0.key, name: AppIdentity.name(of: $0.key), mode: $0.value) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    private func item(_ title: String, action: Selector? = nil) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = action == nil ? nil : self
-        return item
-    }
-
-    @objc private func toggleBase() {
-        policy.base = Self.preference.toggled
-        if Self.setPreference(policy.base) { frontmostChanged() }
-        else { lastError = "Не удалось сохранить режим верхнего ряда" }
+    func setRule(_ mode: FunctionKeyMode?, for bundleID: String) {
+        policy.setRule(mode, for: bundleID)
+        saveRules()
+        frontmostChanged()
         onChange?()
     }
 
-    @objc private func chooseRule(_ sender: NSMenuItem) {
-        guard let choice = sender.representedObject as? RuleChoice else { return }
-        policy.setRule(choice.mode, for: choice.bundleID)
-        saveRules()
-        frontmostChanged()
+    func menuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "F1–F12 без fn", action: #selector(toggleBase), keyEquivalent: "")
+        item.target = self
+        item.state = policy.base == .standard ? .on : .off
+        if let shortcut = hotKey.shortcut, hotKey.isRegistered { AppIdentity.show(shortcut, on: item) }
+        item.toolTip = "Включено: F1–F12 работают сами, яркость и звук — с fn. Выключено: наоборот"
+        return item
+    }
+
+    @objc private func toggleBase() { setBase(Self.preference.toggled) }
+
+    private func setBase(_ mode: FunctionKeyMode) {
+        policy.base = mode
+        if Self.setPreference(mode) { frontmostChanged() }
+        else { lastError = "Не удалось сохранить режим верхнего ряда" }
         onChange?()
     }
 
@@ -127,10 +105,10 @@ final class FunctionKeyController: NSObject {
         apply(policy.mode(for: id))
         let mode = policy.mode(for: id)
         if lastError == nil, Self.live == mode {
-            let scope = baseChanged ? "везде" : "в «\(Self.name(of: id ?? "", fallback: app?.localizedName))»"
-            hud.show(Self.title(mode), detail: scope)
+            let scope = baseChanged ? "везде" : "в «\(AppIdentity.name(of: id ?? "", fallback: app?.localizedName))»"
+            StatusHUD.shared.show(Self.title(mode), detail: scope)
         } else {
-            hud.show("Верхний ряд не переключился", detail: "Подробности в меню SSwitcher")
+            StatusHUD.shared.show("Верхний ряд не переключился", detail: "Подробности в настройках SSwitcher", force: true)
         }
         onChange?()
     }
@@ -146,25 +124,17 @@ final class FunctionKeyController: NSObject {
 
     // MARK: System
 
-    private static func title(_ mode: FunctionKeyMode) -> String {
+    static func title(_ mode: FunctionKeyMode) -> String {
         mode == .standard ? "F1–F12 без fn" : "Яркость и звук без fn"
     }
 
     /// Only ordinary Dock applications get rules. SSwitcher itself and system
     /// agents such as loginwindow (frontmost while the screen is locked) use
     /// the base mode.
-    private static func bundleID(_ app: NSRunningApplication?) -> String? {
+    static func bundleID(_ app: NSRunningApplication?) -> String? {
         guard let app, app.activationPolicy == .regular, let id = app.bundleIdentifier,
               id != Bundle.main.bundleIdentifier else { return nil }
         return id
-    }
-
-    private static func name(of bundleID: String, fallback: String? = nil) -> String {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            let name = FileManager.default.displayName(atPath: url.path)
-            return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
-        }
-        return fallback ?? bundleID
     }
 
     /// Missing preference means the macOS default: media keys.

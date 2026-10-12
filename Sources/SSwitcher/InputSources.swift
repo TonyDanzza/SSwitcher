@@ -13,6 +13,24 @@ enum InputSources {
 
     static func sourceChanged() -> Bool { observation.observe(currentID) }
 
+    /// The key's character in the current ASCII-capable layout (ABC), so a
+    /// shortcut reads "⌃⌥⌘F" while a Russian layout is selected.
+    static func asciiCharacter(forKeyCode key: UInt16) -> String? {
+        guard let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
+        guard let bytes = CFDataGetBytePtr(data) else { return nil }
+        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var deadKey: UInt32 = 0
+        var length = 0
+        var buffer = [UniChar](repeating: 0, count: 4)
+        guard UCKeyTranslate(layout, key, UInt16(kUCKeyActionDisplay), 0, UInt32(LMGetKbdType()),
+                             OptionBits(kUCKeyTranslateNoDeadKeysMask), &deadKey, buffer.count, &length, &buffer) == noErr,
+              length > 0 else { return nil }
+        let result = String(utf16CodeUnits: buffer, count: length)
+        return result.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0 == " " }) ? nil : result
+    }
+
     @discardableResult
     static func selectAfterConversion(_ source: TISInputSource) -> OSStatus {
         // Initialize the baseline before changing the source. An observer

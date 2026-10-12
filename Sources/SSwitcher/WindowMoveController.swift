@@ -21,6 +21,11 @@ private struct WindowScreenSnapshot: Equatable {
     }
 }
 
+extension WindowMoveController {
+    /// Current displays in AX coordinates, for choosing shortcut directions.
+    static func currentDisplays() -> [WindowDisplay] { WindowScreenSnapshot.capture()?.displays ?? [] }
+}
+
 private struct WindowAXContext {
     let pid: pid_t
     let application: AXUIElement

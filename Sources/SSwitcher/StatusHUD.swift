@@ -8,14 +8,17 @@ private final class HUDPanel: NSPanel {
 /// A short, non-activating notice below the menu bar, so a global shortcut
 /// confirms what it changed without taking focus from the user's editor.
 final class StatusHUD {
+    static let shared = StatusHUD()
     private var panel: HUDPanel?
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private var hideWork: DispatchWorkItem?
     private var generation = 0
 
-    func show(_ text: String, detail subtitle: String) {
+    /// Settings can turn notices off; `force` still shows failures.
+    func show(_ text: String, detail subtitle: String, force: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard force || AppSettings.shared.showNotices else { return }
         let panel = self.panel ?? makePanel()
         self.panel = panel
         title.stringValue = text

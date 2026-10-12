@@ -2,8 +2,10 @@ import AppKit
 import Carbon
 import SwitcherCore
 
-/// Carbon owns only the four registered shortcuts. The conversion listener
-/// stays listen-only; disabling this feature removes every registration.
+/// Carbon owns only the registered arrow shortcuts: the directions chosen in
+/// Settings (by default those with a neighboring display) with the chosen
+/// modifiers. The conversion listener stays listen-only; disabling this
+/// feature removes every registration.
 final class WindowMoveHotKeys {
     var onMove: ((WindowMoveDirection) -> Void)?
     private var handler: EventHandlerRef?
@@ -11,13 +13,18 @@ final class WindowMoveHotKeys {
     private var presses = WindowShortcutPressGate()
     private let signature: OSType = 0x5353574D // SSWM
     private(set) var lastError: OSStatus?
-    var isRegistered: Bool { registrations.count == 4 }
+    private(set) var directions: Set<WindowMoveDirection> = []
+    private(set) var modifiers: KeyShortcut.Modifiers = [.option, .shift]
+    var isRegistered: Bool { !registrations.isEmpty && registrations.count == directions.count }
 
     @discardableResult
-    func start() -> Bool {
+    func start(directions: Set<WindowMoveDirection>, modifiers: KeyShortcut.Modifiers) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
-        if isRegistered { return true }
+        if isRegistered && directions == self.directions && modifiers == self.modifiers { return true }
         stop()
+        self.directions = directions
+        self.modifiers = modifiers
+        guard !directions.isEmpty else { return false }
         var types = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
                      EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
         let result = InstallEventHandler(GetApplicationEventTarget(), { next, event, context in
@@ -26,9 +33,10 @@ final class WindowMoveHotKeys {
             return owner.handle(event) ? noErr : CallNextEventHandler(next, event)
         }, types.count, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
         guard result == noErr else { lastError = result; stop(); return false }
-        for (direction, code) in [(WindowMoveDirection.left, kVK_LeftArrow), (.right, kVK_RightArrow), (.up, kVK_UpArrow), (.down, kVK_DownArrow)] {
+        for (direction, code) in [(WindowMoveDirection.left, kVK_LeftArrow), (.right, kVK_RightArrow), (.up, kVK_UpArrow), (.down, kVK_DownArrow)]
+        where directions.contains(direction) {
             var reference: EventHotKeyRef?
-            let result = RegisterEventHotKey(UInt32(code), UInt32(optionKey | shiftKey),
+            let result = RegisterEventHotKey(UInt32(code), modifiers.rawValue,
                 EventHotKeyID(signature: signature, id: direction.rawValue), GetApplicationEventTarget(),
                 OptionBits(kEventHotKeyExclusive), &reference)
             guard result == noErr, let reference else { lastError = result; stop(); return false }

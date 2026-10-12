@@ -25,6 +25,15 @@ final class KeyboardMonitor {
     private(set) var doubleShiftCount = 0
     private(set) var syntheticEventCount = 0
     private var detector = DoubleShiftDetector()
+
+    /// Settings: which Shift counts and how fast both taps must be. Main thread,
+    /// like the tap itself; a change drops any half-finished pair.
+    func configureDoubleShift(keys: Set<UInt16>, interval: Double) {
+        guard detector.keys != keys || detector.interval != interval else { return }
+        detector.keys = keys
+        detector.interval = interval
+        detector.reset()
+    }
     private var typedWord = TypedWordTracker()
     private var layoutData: CFData?
     /// Text-free counters explaining why a MAX gesture had no known word.

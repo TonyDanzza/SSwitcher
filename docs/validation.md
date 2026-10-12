@@ -1,4 +1,15 @@
-# Validation — 0.1.24 / build 178
+# Validation — 0.1.25 / build 179
+
+## Settings window and short menu — build 179
+
+On 12 October 2026, MacBook display only (one display), `swift test`: **262 tests, zero failures** (new: window shortcut directions for a monitor above, side by side, three and mirrored displays; shortcut validation and storage; left/right Shift choice and interval).
+
+- The status menu, read through System Events, has 7 items: double Shift, "Переносить окна" with the subtitle "Ждёт второго дисплея", "F1–F12 без fn", "Не засыпать", "Настройки…", "Завершить SSwitcher".
+- All seven Settings panes were captured with `screencapture -l`; after fixes the toolbar fits without overflow, notes under groups are left aligned, shortcut fields sit on their label's row.
+- Keep-awake shortcut: recording ⌃⌥⌘K through System Events stored keyCode 40 with ⌃⌥⌘; pressing it created the "SSwitcher: keep display awake" assertion, pressing again removed it; Delete in the field stored an empty shortcut.
+
+Not checked: automatic arrows with a second display connected (unit tests only), adding applications through the menu and the open panel, exclusions, Shift choice and speed by hand, battery threshold and unplug stop, the top-row toggle from Settings.
+
 
 ## Top-row mode and keep awake — build 178
 

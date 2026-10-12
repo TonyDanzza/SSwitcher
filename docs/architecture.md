@@ -9,7 +9,8 @@
 - `MaxConversionRouter`: picks the MAX route with the pure `MaxConversionRoute` (retype a typed word, one direct Services request, or the full Services transaction) and runs it.
 - `NativeServiceProvider`, `NativeSelectionServiceProof` and `NativeWordServiceCoordinator`: the MAX Services provider (Cmd+F19 packet, Cmd+F20 barrier) and its transaction.
 - `WindowMoveController`: directional window transfer using Accessibility; `WindowMoveHotKeys` owns the Carbon shortcut registrations.
-- `FunctionKeyController` and `FunctionKeyHotKey`: the top-row mode (pure rules in `FunctionKeyPolicy`) and its Control+Option+Command+F shortcut; `StatusHUD` confirms the shortcut.
+- `FunctionKeyController`: the top-row mode (pure rules in `FunctionKeyPolicy`); `GlobalHotKey` registers it and the keep-awake shortcut; `StatusHUD` confirms a shortcut.
+- `AppSettings`, `SettingsWindowController`, `SettingsPanes` and `ShortcutField`: stored choices and the Settings window (see below).
 - `KeepAwakeController`: one display-sleep power assertion with a timer and a battery stop (parsing and plurals in `KeepAwakeDuration`).
 - `DiagnosticsWindow`, `PerformanceRecorder` and `ReplacementOverlay`: status, bounded measurements and an optional visual transition for editors with reliable geometry.
 
@@ -73,6 +74,14 @@ Option+Shift+arrows choose a neighbor from the actual display topology with no w
 The sequence shrinks on the source display, moves, then grows on the destination. Right after a window changes displays, its application still limits a resize to the previous display's edge for about 12–16 ms (TextEdit and Finder on this Mac); no AX notification marks the moment it adopts the new display. Growth after a display change therefore waits 50 ms, and a growth that still comes back short is issued once more after 150 ms.
 
 The original focused window, owner and display snapshot are revalidated before each position/size setter. A step is accepted when the AX frame matches it, when a changed frame stays the same for 40 ms (macOS or the application adjusted it), or when an unchanged frame stays for 200 ms; otherwise it stops at 0.5 s. A later position step is skipped when the origin macOS accepted for the move already holds. The final frame is classified against the plan within 4 pt per edge as moved, adjusted (on the destination display) or unconfirmed. `WindowMoveReport` keeps the displays, plan, steps and final frame, without titles. User activity and topology changes cancel pending work.
+
+## Settings
+
+`AppSettings` keeps every choice in UserDefaults; keys from earlier builds (`paused`, `windowMovementDisabled`, `disableSmoothReplacement`, `functionKeyApplications`, `keepAwakeCustomMinutes`) keep their meaning. Each change calls one app handler that reconfigures the double-Shift detector (`keys`, `interval`), the Carbon shortcuts and the window shortcut registration. A cleared optional shortcut is stored as an empty dictionary so the default does not return.
+
+The window is an AppKit `NSTabViewController` in toolbar style; each pane is a SwiftUI grouped `Form` in an `NSHostingController` with a fixed height. While it is visible the app switches to the regular activation policy (Dock, Command-Tab, a main menu with Edit commands) and a one-second timer refreshes `SettingsStatus` (permissions, displays, registration problems, results); closing returns to the accessory policy. While a shortcut field records, SSwitcher's own Carbon shortcuts are unregistered so the current combination can be recorded. `KeyShortcut` (SwitcherCore) rejects shortcuts without ⌃, ⌥ or ⌘ (except F13–F20) and reserved system combinations.
+
+Window shortcut directions are `WindowShortcutDirections.available(in:)` by default: a direction is registered when some display has another beyond its facing edge, the same edge test the transfer plan uses. Manual mode registers the chosen arrows; nothing registers with one display.
 
 ## Top-row mode
 

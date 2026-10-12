@@ -3,7 +3,8 @@ import IOKit.ps
 import IOKit.pwr_mgt
 import SwitcherCore
 
-/// Keeps the display, and so the Mac, awake with one power assertion. A timed
+/// Keeps the display, and so the Mac, awake with one power assertion (or only
+/// the Mac, when Settings say the display may sleep). A timed
 /// assertion carries its own timeout, so macOS releases it on time even if
 /// SSwitcher stops; the timer here only clears the menu and the icon mark.
 /// Nothing is restored after a relaunch.
@@ -16,22 +17,50 @@ final class KeepAwakeController: NSObject {
     private var timer: Timer?
     private var powerSource: CFRunLoopSource?
     private var wakeObserver: NSObjectProtocol?
+    private var wasOnBattery = false
+    private let hotKey = GlobalHotKey(signature: 0x53534B41) // SSKA
+    private let settings = AppSettings.shared
     private static let customKey = "keepAwakeCustomMinutes"
 
     var isActive: Bool { assertion != 0 }
+    var isShortcutBlocked: Bool { hotKey.isBlocked }
+
+    override init() {
+        super.init()
+        hotKey.onPress = { [weak self] in self?.shortcutPressed() }
+    }
+
+    /// nil removes the shortcut (also while Settings records a new one).
+    func setShortcut(_ shortcut: KeyShortcut?) { hotKey.start(shortcut) }
+
+    private func shortcutPressed() {
+        if isActive {
+            stop()
+            StatusHUD.shared.show("Не засыпать выключено", detail: "Mac снова засыпает как обычно")
+            return
+        }
+        let minutes = settings.keepAwakeShortcutMinutes
+        start(minutes: minutes > 0 ? minutes : nil)
+        if isActive {
+            StatusHUD.shared.show("Не засыпать", detail: minutes > 0 ? KeepAwakeDuration.title(minutes: minutes) : "пока не выключите")
+        } else {
+            StatusHUD.shared.show("Не засыпать не включилось", detail: lastResult ?? "", force: true)
+        }
+    }
 
     func start(minutes: Int?) {
         release()
         let battery = Self.battery
-        guard KeepAwakeBatteryRule.allows(onBattery: battery.onBattery, percent: battery.percent) else {
-            lastResult = "Не включено: заряд ниже \(KeepAwakeBatteryRule.minimumPercent)%, подключите зарядку"
+        guard KeepAwakeBatteryRule.allows(onBattery: battery.onBattery, percent: battery.percent, minimum: settings.keepAwakeBatteryPercent) else {
+            lastResult = "Не включено: заряд ниже \(settings.keepAwakeBatteryPercent)%, подключите зарядку"
             onChange?()
             return
         }
         var properties: [String: Any] = [
-            kIOPMAssertionTypeKey: kIOPMAssertionTypePreventUserIdleDisplaySleep,
+            kIOPMAssertionTypeKey: settings.keepAwakeSystemOnly
+                ? kIOPMAssertionTypePreventUserIdleSystemSleep : kIOPMAssertionTypePreventUserIdleDisplaySleep,
             kIOPMAssertionLevelKey: kIOPMAssertionLevelOn,
-            kIOPMAssertionNameKey: "SSwitcher: keep display awake"
+            kIOPMAssertionNameKey: settings.keepAwakeSystemOnly ? "SSwitcher: keep Mac awake" : "SSwitcher: keep display awake"
         ]
         if let minutes {
             properties[kIOPMAssertionTimeoutKey] = minutes * 60
@@ -57,6 +86,7 @@ final class KeepAwakeController: NSObject {
             wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in self?.expireIfDue() }
         }
+        wasOnBattery = battery.onBattery
         watchBattery()
         onChange?()
     }
@@ -94,7 +124,7 @@ final class KeepAwakeController: NSObject {
             submenu.addItem(.separator())
         }
         let battery = Self.battery
-        let allowed = KeepAwakeBatteryRule.allows(onBattery: battery.onBattery, percent: battery.percent)
+        let allowed = KeepAwakeBatteryRule.allows(onBattery: battery.onBattery, percent: battery.percent, minimum: settings.keepAwakeBatteryPercent)
         var choices = KeepAwakeDuration.presets
         let custom = UserDefaults.standard.integer(forKey: Self.customKey)
         if custom > 0, !choices.contains(custom) { choices.append(custom) }
@@ -108,12 +138,8 @@ final class KeepAwakeController: NSObject {
         forever.state = isActive && minutes == nil ? .on : .off
         submenu.addItem(forever)
         submenu.addItem(item("Своё время…", action: allowed ? #selector(chooseCustom) : nil))
-        submenu.addItem(.separator())
-        submenu.addItem(item("Экран не гаснет, Mac не засыпает"))
-        if battery.percent != nil {
-            submenu.addItem(item("От батареи выключится при заряде ниже \(KeepAwakeBatteryRule.minimumPercent)%"))
-        }
-        if !allowed { submenu.addItem(item("Заряд ниже \(KeepAwakeBatteryRule.minimumPercent)%: подключите зарядку")) }
+        if !allowed || lastResult != nil { submenu.addItem(.separator()) }
+        if !allowed { submenu.addItem(item("Заряд ниже \(settings.keepAwakeBatteryPercent)%: подключите зарядку")) }
         if let lastResult { submenu.addItem(item(lastResult)) }
         parent.submenu = submenu
         return [parent]
@@ -192,9 +218,17 @@ final class KeepAwakeController: NSObject {
 
     private func powerChanged() {
         let battery = Self.battery
-        guard isActive, !KeepAwakeBatteryRule.allows(onBattery: battery.onBattery, percent: battery.percent) else { return }
-        stop(result: "Выключено: заряд ниже \(KeepAwakeBatteryRule.minimumPercent)% от батареи")
+        let unplugged = battery.onBattery && !wasOnBattery
+        wasOnBattery = battery.onBattery
+        guard isActive else { return }
+        if unplugged && settings.keepAwakeStopOnUnplug {
+            stop(result: "Выключено: Mac отключили от зарядки")
+        } else if !KeepAwakeBatteryRule.allows(onBattery: battery.onBattery, percent: battery.percent, minimum: settings.keepAwakeBatteryPercent) {
+            stop(result: "Выключено: заряд ниже \(settings.keepAwakeBatteryPercent)% от батареи")
+        }
     }
+
+    var hasBattery: Bool { Self.battery.percent != nil }
 
     private static var battery: (onBattery: Bool, percent: Int?) {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return (false, nil) }
@@ -215,5 +249,5 @@ final class KeepAwakeController: NSObject {
         return Calendar.current.isDateInToday(date) ? time : "\(time) завтра"
     }
 
-    deinit { release() }
+    deinit { release(); hotKey.stop() }
 }
