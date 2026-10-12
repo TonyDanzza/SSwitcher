@@ -42,6 +42,29 @@ struct SettingsPanes: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// A control's title with a wrapping caption under it.
+    private func titled(_ title: String, _ caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+            Text(caption).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// A recorder for one SSwitcher shortcut. `other` is the other shortcut
+    /// it cannot share, read when a combination is checked.
+    private func shortcutRow(_ title: String, _ shortcut: Binding<KeyShortcut?>,
+                             besides other: KeyPath<AppSettings, KeyShortcut?>, _ otherName: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            ShortcutField(shortcut: shortcut,
+                          validate: { ownConflict($0, besides: settings[keyPath: other], otherName) },
+                          confirm: actions.confirmShortcut,
+                          onRecordingChange: actions.recordingShortcut)
+                .frame(width: 160, height: 24)
+        }
+    }
+
     // MARK: Основные
 
     private var general: some View {
@@ -93,10 +116,7 @@ struct SettingsPanes: View {
                 Button("Разрешить…", action: request)
             }
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
+            titled(title, detail)
         }
     }
 
@@ -106,11 +126,8 @@ struct SettingsPanes: View {
         Form {
             Section {
                 Toggle(isOn: $settings.conversionEnabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Исправлять раскладку текста")
-                        Text("Набрали «ghbdtn» вместо «привет»? Дважды нажмите клавишу, и текст станет правильным: выделенный или слово перед курсором.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
+                    titled("Исправлять раскладку текста",
+                           "Набрали «ghbdtn» вместо «привет»? Дважды нажмите клавишу, и текст станет правильным: выделенный или слово перед курсором.")
                 }
                 Picker("Клавиша", selection: Binding(
                     get: { settings.triggerKey },
@@ -300,10 +317,7 @@ struct SettingsPanes: View {
             Toggle(isOn: Binding(
                 get: { display.current?.hiDPI == true },
                 set: { on in on ? displays.makeCrisp(display) : displays.makeNative(display) })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("HiDPI")
-                    Text("Текст и интерфейс резче, как на Retina").font(.caption).foregroundStyle(.secondary)
-                }
+                titled("HiDPI", "Текст и интерфейс резче, как на Retina")
             }
         } else if display.overrideExists {
             LabeledContent("HiDPI", value: "появится после перезагрузки Mac")
@@ -312,10 +326,7 @@ struct SettingsPanes: View {
                 Button("Добавить размеры HiDPI…") { displays.installOverride(for: display) }
                     .disabled(displays.isChangingOverride)
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("HiDPI")
-                    Text("macOS не предлагает HiDPI для этого монитора").font(.caption).foregroundStyle(.secondary)
-                }
+                titled("HiDPI", "macOS не предлагает HiDPI для этого монитора")
             }
         }
     }
@@ -343,15 +354,8 @@ struct SettingsPanes: View {
                     Text("Яркость и звук").tag(FunctionKeyMode.media)
                 }
                 .pickerStyle(.radioGroup)
-                HStack {
-                    Text("Переключать сочетанием")
-                    Spacer()
-                    ShortcutField(shortcut: $settings.functionKeyShortcut,
-                                  validate: { ownConflict($0, besides: settings.keepAwakeShortcut, "«Не засыпать»") },
-                                  confirm: actions.confirmShortcut,
-                                  onRecordingChange: actions.recordingShortcut)
-                        .frame(width: 160, height: 24)
-                }
+                shortcutRow("Переключать сочетанием", $settings.functionKeyShortcut,
+                            besides: \.keepAwakeShortcut, "«Не засыпать»")
                 if status.functionShortcutBlocked {
                     Text("Это сочетание заняла другая программа. Выберите другое.").foregroundStyle(.red)
                 }
@@ -396,15 +400,8 @@ struct SettingsPanes: View {
                 }
             } footer: { note("Изменение действует со следующего включения. Закрытую крышку режим не удерживает: без монитора и зарядки Mac всё равно уснёт.") }
             Section {
-                HStack {
-                    Text("Включать и выключать сочетанием")
-                    Spacer()
-                    ShortcutField(shortcut: $settings.keepAwakeShortcut,
-                                  validate: { ownConflict($0, besides: settings.functionKeyShortcut, "верхним рядом") },
-                                  confirm: actions.confirmShortcut,
-                                  onRecordingChange: actions.recordingShortcut)
-                        .frame(width: 160, height: 24)
-                }
+                shortcutRow("Включать и выключать сочетанием", $settings.keepAwakeShortcut,
+                            besides: \.functionKeyShortcut, "верхним рядом")
                 Picker("Включать на", selection: $settings.keepAwakeShortcutMinutes) {
                     ForEach(KeepAwakeDuration.presets, id: \.self) { Text(KeepAwakeDuration.title(minutes: $0)).tag($0) }
                     Text("Пока не выключу").tag(0)

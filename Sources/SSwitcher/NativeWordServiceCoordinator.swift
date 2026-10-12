@@ -61,22 +61,17 @@ final class NativeWordServiceCoordinator {
             return
         }
         guard waitForModifiers({ [weak self] in self?.start() }) else { return }
-        guard beforeKeys(), let number = windowNumber(),
-              let raw = NativeServiceBarrierEvents.batch([
-                (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
-              ]),
-              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
-            fail("Нативная проверка выделения MAX недоступна"); return
+        issue([(CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)],
+              unavailable: "Нативная проверка выделения MAX недоступна", before: {
+            phase = "selection"
+            committing = true
+            record("selectionIssued")
+            armTimeout("MAX не подтвердил завершение запроса выделения")
+        }) { [weak self] delivered in
+            guard let self, self.live, self.phase == "selection" else { return }
+            self.selectionState.delivery(delivered)
+            self.completeSelection()
         }
-        phase = "selection"
-        committing = true
-        record("selectionIssued")
-        armTimeout("MAX не подтвердил завершение запроса выделения")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
-                guard let self, self.live, self.phase == "selection" else { return }
-                self.selectionState.delivery(delivered)
-                self.completeSelection()
-            }
     }
 
     private func completeSelection() {
@@ -133,26 +128,21 @@ final class NativeWordServiceCoordinator {
         // receives the actual selection, validates it, and returns its
         // replacement in that same call. No extra read/navigation/AX action
         // occurs while the word is selected.
-        guard beforeKeys(), let number = windowNumber(),
-              let raw = NativeServiceBarrierEvents.batch(
-                (restoreBoundary ? [(CGKeyCode(kVK_LeftArrow), CGEventFlags())] : []) + [
-                    (CGKeyCode(kVK_LeftArrow), [.maskAlternate, .maskShift]),
-                    (CGKeyCode(kVK_F19), .maskCommand)
-                ]),
-              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
-            fail("Нативная замена слова недоступна"); return
+        issue((restoreBoundary ? [(CGKeyCode(kVK_LeftArrow), CGEventFlags())] : []) + [
+                (CGKeyCode(kVK_LeftArrow), [.maskAlternate, .maskShift]),
+                (CGKeyCode(kVK_F19), .maskCommand)
+              ], unavailable: "Нативная замена слова недоступна", before: {
+            phase = "wordCommit"
+            committing = true
+            wordIssuedAt = ProcessInfo.processInfo.systemUptime
+            armTimeout("MAX не предоставил слово для нативной замены")
+            record("wordCommitIssued")
+        }) { [weak self] delivered in
+            guard let self, self.live else { return }
+            self.commitState.pressed(delivered)
+            if !delivered { self.fail("Нативный вызов замены не доставлен MAX"); return }
+            self.completeCommit()
         }
-        phase = "wordCommit"
-        committing = true
-        wordIssuedAt = ProcessInfo.processInfo.systemUptime
-        armTimeout("MAX не предоставил слово для нативной замены")
-        record("wordCommitIssued")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
-                guard let self, self.live else { return }
-                self.commitState.pressed(delivered)
-                if !delivered { self.fail("Нативный вызов замены не доставлен MAX"); return }
-                self.completeCommit()
-            }
     }
 
     var isAwaitingConversion: Bool { live && committing && (phase == "selection" || phase == "wordCommit") }
@@ -227,17 +217,28 @@ final class NativeWordServiceCoordinator {
         return resolvedWindowNumber
     }
 
+    /// Posts one batch bound to the transaction's window: `beforeKeys` proves
+    /// the same focused window, then the batch is built and bound to its
+    /// number; any failure ends with `unavailable`. `before` runs right
+    /// before posting, `delivered` receives MAX's delivery receipt.
+    private func issue(_ keys: [(CGKeyCode, CGEventFlags)], unavailable: String,
+                       before: () -> Void, delivered: @escaping (Bool) -> Void) {
+        guard beforeKeys(), let number = windowNumber(),
+              let raw = NativeServiceBarrierEvents.batch(keys),
+              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
+            fail(unavailable); return
+        }
+        before()
+        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid, completion: delivered)
+    }
+
     /// One plain navigation key, then a settle before `then`.
     private func perform(_ key: Int, then: @escaping () -> Void) {
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.perform(key, then: then) }) else { return }
-        guard beforeKeys(), let number = windowNumber(),
-              let raw = NativeServiceBarrierEvents.batch([(CGKeyCode(key), [])]),
-              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
-            fail("Замена отменена: исходное окно или клавиши недоступны"); return
-        }
-        armTimeout("MAX не подтвердил доставку навигации")
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
+        issue([(CGKeyCode(key), [])], unavailable: "Замена отменена: исходное окно или клавиши недоступны", before: {
+            armTimeout("MAX не подтвердил доставку навигации")
+        }) { [weak self] delivered in
             guard let self, self.live else { return }
             self.timeout?.cancel(); self.timeout = nil
             guard delivered else { self.fail("Навигация не доставлена MAX"); return }
@@ -252,18 +253,13 @@ final class NativeWordServiceCoordinator {
                       navigation: [(CGKeyCode, CGEventFlags)] = []) {
         guard live else { return }
         guard waitForModifiers({ [weak self] in self?.read(completion, noSelection: noSelection, navigation: navigation) }) else { return }
-        guard beforeKeys(), let number = windowNumber(),
-              let raw = NativeServiceBarrierEvents.batch(navigation + [
-                (CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)
-              ]),
-              let events = NativeServiceBarrierEvents.boundToWindow(raw, number: number) else {
-            fail("Нативное чтение MAX недоступно"); return
-        }
-        record("reading")
         let ticket = Packet(completion, noSelection: noSelection)
-        packet = ticket
-        armPacketTimeout(ticket)
-        KeyboardEvents.postAndAwaitDelivery(events, targetPID: pid) { [weak self] delivered in
+        issue(navigation + [(CGKeyCode(kVK_F19), .maskCommand), (CGKeyCode(kVK_F20), .maskCommand)],
+              unavailable: "Нативное чтение MAX недоступно", before: {
+            record("reading")
+            packet = ticket
+            armPacketTimeout(ticket)
+        }) { [weak self] delivered in
             guard let self, self.live, self.packet === ticket else { return }
             guard delivered else { self.fail("Вызов службы не доставлен MAX"); return }
             ticket.state.delivery(true)
