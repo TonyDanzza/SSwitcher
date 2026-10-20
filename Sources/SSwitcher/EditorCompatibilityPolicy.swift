@@ -7,6 +7,8 @@ struct EditorApplication {
     let bundleID: String
     let session: String
     let isElectron: Bool
+    /// Chromium browser; shares only Electron's accessibility wake-up.
+    let isChromium: Bool
     let isQtQuick: Bool
 
     private static var described: [String: EditorApplication] = [:]
@@ -31,6 +33,7 @@ struct EditorApplication {
         let version = bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
         session = "\(pid):\(application.launchDate?.timeIntervalSince1970 ?? 0):\(bundleID):\(version)"
         isElectron = ElectronApplicationBundle.recognizes(application.bundleURL)
+        isChromium = !isElectron && ChromiumApplicationBundle.recognizes(application.bundleURL)
         isQtQuick = QtQuickApplicationBundle.recognizes(application.bundleURL)
     }
 }

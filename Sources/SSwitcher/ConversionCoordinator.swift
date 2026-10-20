@@ -26,6 +26,8 @@ final class ConversionCoordinator {
     /// input after an idle period has nothing to invalidate.
     private var attemptCachesFilled = false
     private(set) var diagnosticDetails = ""
+    /// Text-free phase and refusal of the last finished attempt.
+    private(set) var lastSummary: [String: Any] = [:]
     var isConverting: Bool { attempt != nil }
 
     private func client(for pid: pid_t) -> AXClient {
@@ -74,11 +76,13 @@ final class ConversionCoordinator {
                          observedModifiersClear: @escaping () -> Bool,
                          completion: @escaping (Outcome) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
+        lastSummary = ["phase": "start"]
         guard attempt == nil else { completion(.ignored); return }
         // Refuse a leftover experimental source, so legacy replacement cannot
         // run beside its separate input-method process. Ordinary layouts use AX.
         guard InputMethodIdentity.currentMode == nil else { completion(.ignored); return }
         if unconfirmedInput?() == true {
+            lastSummary["refusal"] = "previousUnconfirmed"
             completion(.failure("Предыдущая замена не подтверждена. Проверьте текст и поставьте курсор заново")); return
         }
         unconfirmedInput = nil
@@ -168,7 +172,10 @@ final class ConversionCoordinator {
             guard let plan = snapshot.selectionPlan else {
                 if AccessibilitySelectionPlan.hasTextAttachment((document as NSString).substring(with: range)) {
                     refuse(attempt, .attachmentInScope, "Выделение содержит вложение; выделите только текст")
-                } else { refuse(attempt, .selectedTextMismatch, "Редактор не подтвердил выделенный текст — выделите его заново") }
+                } else {
+                    attempt.mismatch = Self.mismatchDiagnostic(document: document, range: range, selectedText: snapshot.selectedText)
+                    refuse(attempt, .selectedTextMismatch, "Редактор не подтвердил выделенный текст — выделите его заново")
+                }
                 return
             }
             selection = plan
@@ -178,7 +185,11 @@ final class ConversionCoordinator {
                                                            selectedRanges: snapshot.selectedRanges, expectedDocument: document, expectedCaret: range) else {
                 refuse(attempt, .caretUnconfirmed, "Редактор не подтвердил положение курсора"); return
             }
-            guard let word = WordCursorPlan(value: document, caret: range.location) else { finish(attempt, outcome: .ignored); return }
+            // A word typed inside brackets keeps the closing bracket after the caret.
+            let neutral = InputSources.layoutNeutralCharacters()
+            guard let word = WordCursorPlan(value: document, caret: range.location, ignoringTrailing: { neutral.contains($0) }) else {
+                finish(attempt, outcome: .ignored); return
+            }
             guard !AccessibilitySelectionPlan.hasTextAttachment(word.text) else {
                 refuse(attempt, .attachmentInScope, "Рядом с курсором вложение; выделите только текст"); return
             }
@@ -433,6 +444,32 @@ final class ConversionCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
     }
 
+    /// Text-free numbers for a selected-text mismatch: where the reported
+    /// selected text actually occurs relative to the reported range.
+    private static func mismatchDiagnostic(document: String, range: NSRange, selectedText: String?) -> [String: Any] {
+        let string = document as NSString
+        var report: [String: Any] = ["documentUTF16": string.length, "rangeLocation": range.location, "rangeLength": range.length,
+                                     "documentNewlines": document.filter { $0 == "\n" || $0 == "\r\n" }.count,
+                                     "documentHasCR": document.unicodeScalars.contains { $0 == "\r" },
+                                     "documentHasNBSP": document.contains("\u{a0}")]
+        guard let selectedText else { report["selectedText"] = "absent"; return report }
+        let selected = selectedText as NSString
+        report["selectedUTF16"] = selected.length
+        report["selectedHasNBSP"] = selectedText.contains("\u{a0}")
+        report["selectedNewlines"] = selectedText.filter { $0 == "\n" || $0 == "\r\n" }.count
+        var deltas: [Int] = []
+        var search = NSRange(location: 0, length: string.length)
+        while selected.length > 0, deltas.count < 8 {
+            let found = string.range(of: selectedText, options: .literal, range: search)
+            guard found.location != NSNotFound else { break }
+            deltas.append(found.location - range.location)
+            search = NSRange(location: found.location + 1, length: string.length - found.location - 1)
+        }
+        report["occurrenceDeltas"] = deltas
+        report["newlinesBeforeRange"] = string.substring(to: min(range.location, string.length)).filter { $0 == "\n" || $0 == "\r\n" }.count
+        return report
+    }
+
     private func refuse(_ attempt: ConversionAttempt, _ reason: Refusal, _ message: String) {
         attempt.refusal = reason
         finish(attempt, outcome: .failure(message))
@@ -453,6 +490,8 @@ final class ConversionCoordinator {
         let confirmed: Bool = if case .converted = outcome { true } else { false }
         if case .unverified = outcome { unconfirmedInput = attempt.unchanged; diagnosticDetails += "; результат не подтверждён" }
         if case .cancelled = outcome { diagnosticDetails += "; отменено до ввода" }
+        lastSummary = ["phase": attempt.phase, "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - attempt.started) * 1000)]
+        if let refusal = attempt.refusal { lastSummary["refusal"] = refusal.rawValue }
         if let context = attempt.context {
             var report = context.conversionDiagnostic()
             switch outcome {
@@ -465,6 +504,7 @@ final class ConversionCoordinator {
             report["editingGuardPassed"] = attempt.editingGuardPassed
             report["phase"] = attempt.phase
             if let refusal = attempt.refusal { report["refusalCode"] = refusal.rawValue }
+            if let mismatch = attempt.mismatch { report["selectionMismatch"] = mismatch }
             if let proof = attempt.scopeRead {
                 report["attachmentRangeText"] = proof.diagnosticCode
                 if case .unavailable(let error) = proof { report["attachmentRangeTextAXError"] = Int(error.rawValue) }
@@ -506,7 +546,9 @@ private final class ConversionAttempt {
     var scopePlan: AccessibilitySelectionPlan?
     var scopeRead: AXTextScopeRead?
     var refusal: ConversionCoordinator.Refusal?
+    var mismatch: [String: Any]?
     var phase = "discovery"
+    let started = ProcessInfo.processInfo.systemUptime
     var replacement: AccessibilityReplacementPlan?
     var deletingCharacters = 0
     var selected = false

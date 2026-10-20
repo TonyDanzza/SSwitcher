@@ -57,7 +57,21 @@ enum InputSources {
         return Unmanaged<CFArray>.fromOpaque(pointer).takeUnretainedValue() as? [String] ?? []
     }
 
-    static func prepare(_ text: String) -> Conversion? {
+    /// Punctuation typed by the same key in both layouts, so it never needs
+    /// conversion: `)` and `!` with ABC and Russian. Empty without both layouts.
+    static func layoutNeutralCharacters() -> Set<Character> {
+        guard let (english, russian) = layoutPair(),
+              let toRussian = KeyboardLayoutMapping.mapping(from: english, to: russian),
+              let toEnglish = KeyboardLayoutMapping.mapping(from: russian, to: english) else { return [] }
+        return Set(Self.candidateNeutral.filter { character in
+            toRussian[character].map { $0 == String(character) } ?? true &&
+                toEnglish[character].map { $0 == String(character) } ?? true &&
+                (toRussian.keys.contains(character) || toEnglish.keys.contains(character))
+        })
+    }
+    private static let candidateNeutral: [Character] = [")", "]", "}", "»", "!", "?", "%", "*"]
+
+    private static func layoutPair() -> (TISInputSource, TISInputSource)? {
         let filter = [
             kTISPropertyInputSourceType: kTISTypeKeyboardLayout as Any,
             kTISPropertyInputSourceIsSelectCapable: true,
@@ -72,6 +86,12 @@ enum InputSources {
             return matches.first { string(kTISPropertyInputSourceID, of: $0) == currentID } ?? matches.first
         }
         guard let english = source(for: "en"), let russian = source(for: "ru") else { return nil }
+        return (english, russian)
+    }
+
+    static func prepare(_ text: String) -> Conversion? {
+        guard let (english, russian) = layoutPair(),
+              let current = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
         let fallback: TextConversion.Direction = languages(current).contains("ru") ? .toEnglish : .toRussian
         let direction = TextConversion.direction(for: text, fallback: fallback)
         let from = direction == .toEnglish ? russian : english

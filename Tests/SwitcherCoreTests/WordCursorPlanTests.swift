@@ -30,4 +30,17 @@ final class WordCursorPlanTests: XCTestCase {
         XCTAssertNotNil(WordCursorPlan(value: "g", caret: 1))
         XCTAssertNotNil(WordCursorPlan(value: "ghbdtn\n", caret: 6))
     }
+
+    func testNeutralTrailingPunctuationDoesNotBlockTheWord() throws {
+        let neutral: (Character) -> Bool = { $0 == ")" || $0 == "!" }
+        let text = "МП Учитель (Hfcgbcfybt)"
+        let caret = (text as NSString).length - 1
+        XCTAssertNil(WordCursorPlan(value: text, caret: caret))
+        let plan = try XCTUnwrap(WordCursorPlan(value: text, caret: caret, ignoringTrailing: neutral))
+        XCTAssertEqual(plan.text, "(Hfcgbcfybt")
+        XCTAssertEqual(try XCTUnwrap(WordCursorPlan(value: "ghbdtn)!", caret: 6, ignoringTrailing: neutral)).text, "ghbdtn")
+        XCTAssertNil(WordCursorPlan(value: "ghbdtn]", caret: 6, ignoringTrailing: neutral))
+        XCTAssertNil(WordCursorPlan(value: "ghb)dtn", caret: 3, ignoringTrailing: neutral))
+        XCTAssertNil(WordCursorPlan(value: "(ghbdtn)", caret: 0, ignoringTrailing: neutral))
+    }
 }

@@ -11,6 +11,8 @@ final class KeyboardMonitor {
     var onGestureRelease: ((Double) -> Void)?
     var onGestureCancelled: (() -> Void)?
     var onBlockedGesture: (() -> Void)?
+    /// A detected double Shift that did not start an attempt, with the reason.
+    var onGestureDropped: ((String) -> Void)?
     var canStartConversion: (() -> Bool)?
     private var burst = ShiftBurstGate(quietInterval: ConversionTiming.shiftQuiet)
     private var pendingDispatch: DispatchWorkItem?
@@ -228,19 +230,29 @@ final class KeyboardMonitor {
             time: Double(event.timestamp) / 1_000_000_000
         ) {
             doubleShiftCount += 1
+            let allowed = canStartConversion?() != false
             if burst.state == .blocked {
                 DispatchQueue.main.async { [weak self] in self?.onBlockedGesture?() }
             }
-            burst.request(allowed: canStartConversion?() != false)
+            if !allowed || (burst.state != .idle && burst.state != .pending) {
+                let reason = allowed ? "burst.\(burst.state)" : "notAllowed"
+                DispatchQueue.main.async { [weak self] in self?.onGestureDropped?(reason) }
+            }
+            burst.request(allowed: allowed)
         }
         guard burst.pending, !shiftDown else { return }
         lastGestureRelease = ProcessInfo.processInfo.systemUptime
         onGestureRelease?(lastGestureRelease)
         let generation = inputGeneration
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.inputGeneration == generation,
-                  self.physicalModifiersClear, self.burst.consume(at: ProcessInfo.processInfo.systemUptime),
-                  self.burst.beginConversion(allowed: self.canStartConversion?() != false) else { return }
+            guard let self else { return }
+            let dropped: String?
+            if self.inputGeneration != generation { dropped = "inputChanged" }
+            else if !self.physicalModifiersClear { dropped = "modifiersHeld" }
+            else if !self.burst.consume(at: ProcessInfo.processInfo.systemUptime) { dropped = "notQuiet" }
+            else if !self.burst.beginConversion(allowed: self.canStartConversion?() != false) { dropped = "notStarted" }
+            else { dropped = nil }
+            if let dropped { self.onGestureDropped?(dropped); return }
             self.detector.reset()
             self.onDoubleShift?()
         }

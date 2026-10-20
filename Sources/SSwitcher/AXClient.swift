@@ -154,7 +154,7 @@ final class AXClient {
     }
 
     private func prepare(_ application: EditorApplication, cancellation: AttemptCancellation? = nil) -> AXElectronPreparationDiagnostic {
-        guard application.isElectron else { return AXElectronPreparationDiagnostic(stage: "notElectron", error: nil) }
+        guard application.isElectron || application.isChromium else { return AXElectronPreparationDiagnostic(stage: "notElectron", error: nil) }
         guard AXIsProcessTrusted() else { return AXElectronPreparationDiagnostic(stage: "notTrusted", error: nil) }
         let now = ProcessInfo.processInfo.systemUptime
         let expires = now + ConversionTiming.electronPreparationBudget
@@ -551,7 +551,55 @@ final class AXClient {
                                           description: includeContext ? slots[7] as? String : nil))
     }
 
-    private func readResult(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool) -> AXSnapshotRead {
+    /// Multi-line Chromium values can disagree with the reported selection
+    /// offsets (empty paragraphs are counted differently). Shift the reported
+    /// ranges into AXValue's space when the target's own range text locates
+    /// them exactly once; when it disagrees and cannot be located, refuse the
+    /// snapshot rather than edit another word. Single-line values and targets
+    /// without AXStringForRange keep their reported offsets.
+    /// `settling`: right after our edit the target may still be updating, so
+    /// unresolved offsets are retried within the acknowledgement budget.
+    private func reportedOffsetsAligned(_ editor: AXUIElement, snapshot: AXEditorSnapshot, settling: Bool) -> AXSnapshotRead {
+        guard let value = snapshot.value, let range = snapshot.range, !snapshot.isSecure,
+              value.contains("\n") || value.contains("\u{2028}") else { return .snapshot(snapshot) }
+        func text(_ requested: NSRange) -> (String?, busy: Bool) {
+            var cfRange = CFRange(location: requested.location, length: requested.length)
+            guard let parameter = AXValueCreate(.cfRange, &cfRange) else { return (nil, false) }
+            var result: CFTypeRef?
+            let error = AXUIElementCopyParameterizedAttributeValue(editor, kAXStringForRangeParameterizedAttribute as CFString, parameter, &result)
+            if error == .cannotComplete { return (nil, true) }
+            return (error == .success ? AccessibilityValue.usable(result) as? String : nil, false)
+        }
+        let shift: Int?
+        if range.length > 0 {
+            guard let selected = snapshot.selectedText else { return .snapshot(snapshot) }
+            let document = value as NSString
+            if NSMaxRange(range) <= document.length, document.substring(with: range) == selected { return .snapshot(snapshot) }
+            // The reported range must name the selected text in the target's
+            // own offsets before that text may relocate it.
+            let reported = text(range)
+            if reported.busy { return .busy }
+            guard reported.0 == selected else { return .snapshot(snapshot) }
+            shift = ReportedRangeShift.resolve(value: value, range: range, selectedText: selected, textBefore: nil)
+        } else {
+            let length = min(range.location, 80)
+            let before = text(NSRange(location: range.location - length, length: length))
+            if before.busy { return .busy }
+            shift = ReportedRangeShift.resolve(value: value, range: range, selectedText: snapshot.selectedText, textBefore: before.0)
+        }
+        guard let shift else { return settling ? .busy : .invalid }
+        guard shift != 0 else { return .snapshot(snapshot) }
+        func moved(_ range: NSRange) -> NSRange { NSRange(location: range.location + shift, length: range.length) }
+        let aligned = moved(range)
+        guard aligned.location >= 0, NSMaxRange(aligned) <= (value as NSString).length else { return settling ? .busy : .invalid }
+        return .snapshot(AXEditorSnapshot(range: aligned, value: value, selectedText: snapshot.selectedText,
+                                          selectedRanges: snapshot.selectedRanges?.map(moved), subrole: snapshot.subrole,
+                                          parent: snapshot.parent, role: snapshot.role, description: snapshot.description,
+                                          usesCanonicalText: snapshot.usesCanonicalText))
+    }
+
+    private func readResult(_ editor: AXUIElement, application: EditorApplication, includeContext: Bool,
+                            settling: Bool = false) -> AXSnapshotRead {
         let includeContext = includeContext || application.bundleID == "com.figma.Desktop"
         let initial = readRaw(editor, application: application, includeContext: includeContext)
         guard case .snapshot(var snapshot) = initial else { return initial }
@@ -563,7 +611,7 @@ final class AXClient {
            snapshot.value.map(AccessibilitySelectionPlan.hasTextAttachment) == true ||
             snapshot.selectedText.map(AccessibilitySelectionPlan.hasTextAttachment) == true { return .invalid }
         guard policy.isCanvasTextEditor(snapshot), let rawValue = snapshot.value,
-              rawValue.contains("\n") || rawValue.contains("\u{2028}") else { return initial }
+              rawValue.contains("\n") || rawValue.contains("\u{2028}") else { return reportedOffsetsAligned(editor, snapshot: snapshot, settling: settling) }
         guard !snapshot.isSecure, !AccessibilitySelectionPlan.hasTextAttachment(rawValue),
               snapshot.selectedText.map({ !AccessibilitySelectionPlan.hasTextAttachment($0) }) != false,
               let range = snapshot.range, range.location <= rawValue.utf16.count,
@@ -616,7 +664,7 @@ final class AXClient {
     func acknowledgement(_ context: AXEditorContext, replacement: AccessibilityReplacementPlan,
                          cancellation: AttemptCancellation) -> AXSnapshotRead {
         guard focusMatches(context), let editor = context.element else { return .invalid }
-        let result = readResult(editor, application: context.application, includeContext: true)
+        let result = readResult(editor, application: context.application, includeContext: true, settling: true)
         guard case .snapshot(let snapshot) = result else { return result }
         guard !snapshot.isSecure, context.policy.permitsEditing(snapshot),
               context.policy.isCanvasTextEditor(snapshot) == context.isCanvasTextEditor,

@@ -2,6 +2,22 @@ import Foundation
 
 /// Packaging evidence only enables Electron's accessibility preparation. It
 /// never establishes an editable field or changes the selection/focus guards.
+/// A Chromium browser (Chrome, Edge, Brave and similar): one of its bundled
+/// frameworks carries a "… Helper (Renderer).app" helper. Like Electron it
+/// builds web-content accessibility only after a client asks for it.
+public enum ChromiumApplicationBundle {
+    public static func recognizes(_ bundleURL: URL?) -> Bool {
+        guard let bundleURL else { return false }
+        let frameworks = bundleURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        guard let children = try? FileManager.default.contentsOfDirectory(at: frameworks, includingPropertiesForKeys: nil) else { return false }
+        return children.contains { framework in
+            guard framework.pathExtension == "framework",
+                  let helpers = try? FileManager.default.contentsOfDirectory(atPath: framework.appendingPathComponent("Helpers").path) else { return false }
+            return helpers.contains { $0.hasSuffix(" Helper (Renderer).app") }
+        }
+    }
+}
+
 public enum ElectronApplicationBundle {
     public static func recognizes(_ bundleURL: URL?) -> Bool {
         guard let bundleURL else { return false }

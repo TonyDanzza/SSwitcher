@@ -112,6 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.windowMoves.cancel()
         }
         maxRouter.restoreWindowShortcuts = { [weak self] in self?.refreshWindowShortcuts() }
+        monitor.onGestureDropped = { reason in
+            DiagnosticReports.shared.appendHistory(["result": "dropped", "reason": reason])
+        }
         monitor.canStartConversion = { [weak self] in
             self?.enabled == true && self?.editor.isConverting == false && self?.maxRouter.isConverting == false &&
                 self?.settings.isExcluded(NSWorkspace.shared.frontmostApplication) == false
@@ -119,7 +122,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.onDoubleShift = { [weak self] in
             guard let self, self.enabled, !self.editor.isConverting, !self.maxRouter.isConverting,
                   !self.settings.isExcluded(NSWorkspace.shared.frontmostApplication),
-                  self.monitor.claimConversion() else { return }
+                  self.monitor.claimConversion() else {
+                DiagnosticReports.shared.appendHistory(["result": "dropped", "reason": "notClaimed"])
+                return
+            }
             self.lastAttempt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             // Keep a leftover experimental source from running beside legacy
             // replacement. The utility no longer starts or requests the IME.
@@ -142,6 +148,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }, modifiersClear: { [weak self] in self?.monitor.physicalModifiersClear == true },
                observedModifiersClear: { [weak self] in self?.monitor.observedModifiersClear == true }) { [weak self] outcome in
                 guard let self else { return }
+                var entry = self.editor.lastSummary
+                switch outcome {
+                case .ignored: entry["result"] = "ignored"
+                case .cancelled: entry["result"] = "cancelled"
+                case .converted: entry["result"] = "converted"
+                case .unverified: entry["result"] = "unverified"
+                case .failure: entry["result"] = "failure"
+                }
+                DiagnosticReports.shared.appendHistory(entry)
                 if case .unverified = outcome { self.monitor.conversionFinished(unverified: true) }
                 else { self.monitor.conversionFinished(unverified: false) }
                 switch outcome {

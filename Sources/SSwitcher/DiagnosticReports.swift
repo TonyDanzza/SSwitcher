@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Text-free diagnostic reports, read with `defaults read com.tonydanzza.SSwitcher`.
 /// Reports are kept in memory and written to UserDefaults together, at most
@@ -56,6 +56,21 @@ final class DiagnosticReports {
         for key in Self.obsoleteKeys where UserDefaults.standard.object(forKey: key) != nil {
             UserDefaults.standard.removeObject(forKey: key)
         }
+    }
+
+    private var history: [[String: Any]] = []
+    static let historyLimit = 20
+
+    /// Keeps the last double-Shift gestures, including ones dropped before
+    /// an attempt, so an occasional failure survives later successes.
+    func appendHistory(_ entry: [String: Any]) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        var value = entry
+        value["time"] = Date().timeIntervalSince1970
+        value["app"] = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        history.append(value)
+        if history.count > Self.historyLimit { history.removeFirst(history.count - Self.historyLimit) }
+        record("ConversionHistory", ["entries": history])
     }
 
     private func scheduleFlush() {

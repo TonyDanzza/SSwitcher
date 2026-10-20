@@ -36,10 +36,14 @@ private struct WindowAXContext {
 
 private enum WindowAXFailure: Error { case busy, invalid }
 private enum WindowFrameRead { case frame(CGRect), busy, invalid }
+/// A failed lookup names the step that refused, for the move report.
+private enum WindowContextRead { case context(WindowAXContext), busy(String), invalid(String) }
 
 /// Uses only public AX messages and geometry; never reads window titles or text.
 private final class WindowAXClient {
     let execution: AccessibilityExecution
+    /// The step being read; reported when a context lookup fails.
+    private var step = ""
     init(policy: AccessibilityExecution.Policy) { execution = AccessibilityExecution(policy: policy) }
     private func configured(_ element: AXUIElement) -> AXUIElement {
         AXUIElementSetMessagingTimeout(element, ConversionTiming.axMessageTimeout)
@@ -65,16 +69,28 @@ private final class WindowAXClient {
         var supported = DarwinBoolean(false)
         return AXUIElementIsAttributeSettable(element, name as CFString, &supported) == .success && supported.boolValue
     }
+    /// The system-wide focus check only refuses a different owner. When it
+    /// cannot be read (Chrome was seen refusing every reply until relaunch),
+    /// the caller's frontmost-process check on the main queue still applies.
+    /// A missing focused window falls back to the main window.
     private func focusedWindow(application: AXUIElement, pid: pid_t) throws -> AXUIElement {
-        let system = configured(AXUIElementCreateSystemWide())
-        let focusedApp = try element(attribute(system, kAXFocusedApplicationAttribute))
         var owner: pid_t = 0
-        guard AXUIElementGetPid(focusedApp, &owner) == .success, owner == pid else { throw WindowAXFailure.invalid }
-        let window = try element(attribute(application, kAXFocusedWindowAttribute))
+        step = "focusedApplication"
+        if let focusedApp = try? element(attribute(configured(AXUIElementCreateSystemWide()), kAXFocusedApplicationAttribute)),
+           AXUIElementGetPid(focusedApp, &owner) == .success, owner != pid { throw WindowAXFailure.invalid }
+        step = "focusedWindow"
+        let window: AXUIElement
+        do { window = try element(attribute(application, kAXFocusedWindowAttribute)) }
+        catch {
+            step = "mainWindow"
+            window = try element(attribute(application, kAXMainWindowAttribute))
+        }
+        step = "windowOwner"
         guard AXUIElementGetPid(window, &owner) == .success, owner == pid else { throw WindowAXFailure.invalid }
         return window
     }
     private func frame(_ window: AXUIElement, screens: WindowScreenSnapshot) throws -> CGRect {
+        step = "windowState"
         guard try attribute(window, kAXRoleAttribute) as? String == kAXWindowRole,
               try !boolean(attribute(window, kAXMinimizedAttribute)) else { throw WindowAXFailure.invalid }
         var names: CFArray?
@@ -84,12 +100,14 @@ private final class WindowAXClient {
         // Read this state only if the target publicly advertises the attribute.
         // The SDK exposes a fullscreen button but no universal window-state API.
         var knownFullscreen: Bool?
+        step = "fullScreen"
         if names.contains("AXFullScreen") { knownFullscreen = try boolean(attribute(window, "AXFullScreen")) }
         guard knownFullscreen != true else { throw WindowAXFailure.invalid }
         if execution.policy == .localApplication {
             guard let own = NSApp.keyWindow, !own.styleMask.contains(.fullScreen), !own.isMiniaturized else { throw WindowAXFailure.invalid }
             knownFullscreen = false
         }
+        step = "geometry"
         let rawPoint = try attribute(window, kAXPositionAttribute), rawSize = try attribute(window, kAXSizeAttribute)
         guard CFGetTypeID(rawPoint) == AXValueGetTypeID(), CFGetTypeID(rawSize) == AXValueGetTypeID(),
               AXValueGetType(rawPoint as! AXValue) == .cgPoint, AXValueGetType(rawSize as! AXValue) == .cgSize else { throw WindowAXFailure.invalid }
@@ -102,15 +120,17 @@ private final class WindowAXClient {
         }
         return frame
     }
-    func context(pid: pid_t, screens: WindowScreenSnapshot) -> WindowAXContext? {
+    func context(pid: pid_t, screens: WindowScreenSnapshot) -> WindowContextRead {
         execution.assertIsolated()
         do {
             let application = configured(AXUIElementCreateApplication(pid))
             let window = try focusedWindow(application: application, pid: pid)
             let frame = try frame(window, screens: screens)
-            guard settable(window, kAXPositionAttribute) else { return nil }
-            return WindowAXContext(pid: pid, application: application, window: window, frame: frame, canResize: settable(window, kAXSizeAttribute))
-        } catch { return nil }
+            guard settable(window, kAXPositionAttribute) else { return .invalid("positionNotSettable") }
+            return .context(WindowAXContext(pid: pid, application: application, window: window, frame: frame,
+                                            canResize: settable(window, kAXSizeAttribute)))
+        } catch WindowAXFailure.busy { return .busy(step) }
+        catch { return .invalid(step) }
     }
     func read(_ context: WindowAXContext, screens: WindowScreenSnapshot) -> WindowFrameRead {
         execution.assertIsolated()
@@ -166,6 +186,8 @@ final class WindowMoveController {
         var settledForGrowth = false
         var repeatedGrowth = false
         var steps: [[String: Any]] = []
+        /// AX step that refused the last context lookup.
+        var failedStep: String?
         var poll: DispatchWorkItem?
         var preparationTimeout: DispatchWorkItem?
         init(pid: pid_t, direction: WindowMoveDirection, screens: WindowScreenSnapshot) {
@@ -209,9 +231,26 @@ final class WindowMoveController {
         let timeout = DispatchWorkItem { [weak self] in self?.finish(attempt, message: "Не удалось вовремя получить активное окно", outcome: "contextTimeout") }
         attempt.preparationTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: timeout)
-        read(attempt, operation: { $0.context(pid: attempt.pid, screens: screens) }) { context in
+        prepare(attempt)
+    }
+    /// A busy application is asked again until the preparation timeout.
+    private func prepare(_ attempt: Attempt) {
+        let screens = attempt.screens, direction = attempt.direction
+        read(attempt, operation: { $0.context(pid: attempt.pid, screens: screens) }) { read in
+            let context: WindowAXContext
+            switch read {
+            case .context(let found): context = found
+            case .busy(let step):
+                attempt.failedStep = step
+                self.schedule(attempt, after: ConversionTiming.windowPollInterval) { self.prepare(attempt) }
+                return
+            case .invalid(let step):
+                attempt.failedStep = step
+                self.finish(attempt, message: "Это окно нельзя перенести; полноэкранные Spaces не перемещаются", outcome: "windowUnavailable")
+                return
+            }
             attempt.preparationTimeout?.cancel(); attempt.preparationTimeout = nil
-            guard let context else { self.finish(attempt, message: "Это окно нельзя перенести; полноэкранные Spaces не перемещаются", outcome: "windowUnavailable"); return }
+            attempt.failedStep = nil
             attempt.expected = context.frame
             let decision = WindowTransferPlan.decide(window: context.frame, displays: screens.displays, direction: direction, canResize: context.canResize)
             switch decision {
@@ -352,6 +391,7 @@ final class WindowMoveController {
                                                                                   "visible": Self.numbers($0.visibleFrame)] },
                                      "steps": attempt.steps]
         if let context = attempt.context { report["source"] = Self.numbers(context.frame) }
+        if let failedStep = attempt.failedStep { report["failedStep"] = failedStep }
         if let plan = attempt.plan {
             report["plan"] = Self.numbers(plan.frame)
             report["sourceDisplay"] = Int(plan.sourceID); report["destinationDisplay"] = Int(plan.destinationID)
