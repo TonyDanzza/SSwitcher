@@ -111,6 +111,18 @@ public struct UnicodeTextInput {
         return batches
     }
 
+    /// Backspaces alone, for editors that must confirm the deletion before
+    /// the replacement text is typed. `asOneWord` sends one Option+Backspace.
+    public static func deletionBatch(count: Int, asOneWord: Bool = false) -> [CGEvent]? {
+        guard count > 0 else { return nil }
+        var events: [CGEvent] = []
+        for _ in 0..<(asOneWord ? 1 : count) {
+            guard let pair = deletionPair(flags: asOneWord ? .maskAlternate : []) else { return nil }
+            events.append(contentsOf: pair)
+        }
+        return events
+    }
+
     private static func deletionPair(flags: CGEventFlags = []) -> [CGEvent]? {
         guard let source = SyntheticKeyboardSource.make() else { return nil }
         source.userData = KeyboardEventDelivery.sourceMarker

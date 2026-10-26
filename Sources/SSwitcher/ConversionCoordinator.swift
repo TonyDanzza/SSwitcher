@@ -348,10 +348,68 @@ final class ConversionCoordinator {
         guard let input = UnicodeTextInput(text: text, controlPolicy: policy) else {
             refuse(attempt, .unicodePayloadUnsupported, "Редактор не поддерживает безопасную замену такого фрагмента"); return
         }
-        guard CGPreflightPostEventAccess(), let batches = input.makeEventBatches(deletingCharacters: attempt.deletingCharacters),
+        // A word is deleted first and typed only once the editor shows it
+        // gone: web search fields can drop fast Backspaces while they rebuild.
+        let deleting = attempt.selected ? 0 : attempt.deletingCharacters
+        guard CGPreflightPostEventAccess(), let batches = input.makeEventBatches(deletingCharacters: 0),
+              deleting == 0 || UnicodeTextInput.deletionBatch(count: deleting) != nil,
               reserveMutation(attempt) else { finish(attempt, outcome: .cancelled); return }
-        KeyboardEvents.postTextReplacement(batches, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { delivered in
-            self.mutationDelivered(attempt, delivered: delivered)
+        let typeText = {
+            KeyboardEvents.postTextReplacement(batches, valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { delivered in
+                self.mutationDelivered(attempt, delivered: delivered)
+            }
+        }
+        guard deleting > 0, let scope = attempt.scopePlan else { typeText(); return }
+        let deadline = ReadinessDeadline(start: ProcessInfo.processInfo.systemUptime, timeout: ConversionTiming.wordDeletionDeadline,
+                                         pollInterval: ConversionTiming.pollInterval)
+        // Browser pages can take ~60 ms per Backspace while they rebuild
+        // suggestions. A letters-only word (whitespace-bounded by its token)
+        // goes in one Option+Backspace; any rest is deleted below.
+        let browser = context.application.isChromium || ["com.apple.Safari", "com.apple.SafariTechnologyPreview"].contains(context.application.bundleID)
+        let asOneWord = browser && TypedWordTracker.deletesAsOneWord(scope.text, boundedStart: true)
+        deleteWord(attempt, context: context, scope: scope, count: deleting, asOneWord: asOneWord, topUps: 0, deadline: deadline, then: typeText)
+    }
+
+    /// Posts `count` Backspaces, then waits for the editor to show the word gone.
+    private func deleteWord(_ attempt: ConversionAttempt, context: AXEditorContext, scope: AccessibilitySelectionPlan,
+                            count: Int, asOneWord: Bool = false, topUps: Int, deadline: ReadinessDeadline, then: @escaping () -> Void) {
+        guard let batch = UnicodeTextInput.deletionBatch(count: count, asOneWord: asOneWord) else { finish(attempt, outcome: .unverified); return }
+        KeyboardEvents.postTextReplacement([batch], valid: { self.valid(attempt) }, modifiersClear: attempt.observedModifiersClear) { delivered in
+            guard delivered else { self.mutationDelivered(attempt, delivered: false); return }
+            self.awaitDeletion(attempt, context: context, scope: scope, posted: count, topUps: topUps, deadline: deadline,
+                               last: nil, stableSince: ProcessInfo.processInfo.systemUptime, then: then)
+        }
+    }
+
+    /// Deletion that started (fewer than `posted` units left) and then stays
+    /// unchanged for `deletionStableInterval` lost its Backspaces; the missing
+    /// ones are sent again, at most twice. A page that has not applied any yet
+    /// is only waited for, so queued Backspaces never delete past the word.
+    private func awaitDeletion(_ attempt: ConversionAttempt, context: AXEditorContext, scope: AccessibilitySelectionPlan,
+                               posted: Int, topUps: Int, deadline: ReadinessDeadline, last: DeletionProgress?, stableSince: Double,
+                               then: @escaping () -> Void) {
+        guard valid(attempt) else { finish(attempt, outcome: .unverified); return }
+        guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else {
+            diagnosticDetails += "; редактор не подтвердил удаление слова"
+            finish(attempt, outcome: .unverified); return
+        }
+        read(attempt, operation: { $0.validate(context) }) { snapshot in
+            let progress = DeletionProgress.evaluate(document: scope.document, wordRange: scope.range,
+                                                     value: snapshot?.value, caret: snapshot?.range)
+            let now = ProcessInfo.processInfo.systemUptime
+            let since = progress == last ? stableSince : now
+            switch progress {
+            case .done: then(); return
+            case .remaining(let count) where count < posted && topUps < 2 && now - since >= ConversionTiming.deletionStableInterval:
+                attempt.lostBackspaces += count
+                self.deleteWord(attempt, context: context, scope: scope, count: count, topUps: topUps + 1, deadline: deadline, then: then)
+                return
+            default: break
+            }
+            self.schedule(attempt, delay: ConversionTiming.pollInterval) {
+                self.awaitDeletion(attempt, context: context, scope: scope, posted: posted, topUps: topUps, deadline: deadline,
+                                   last: progress, stableSince: since, then: then)
+            }
         }
     }
 
@@ -492,6 +550,7 @@ final class ConversionCoordinator {
         if case .cancelled = outcome { diagnosticDetails += "; отменено до ввода" }
         lastSummary = ["phase": attempt.phase, "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - attempt.started) * 1000)]
         if let refusal = attempt.refusal { lastSummary["refusal"] = refusal.rawValue }
+        if attempt.lostBackspaces > 0 { lastSummary["lostBackspaces"] = attempt.lostBackspaces }
         if let context = attempt.context {
             var report = context.conversionDiagnostic()
             switch outcome {
@@ -551,6 +610,8 @@ private final class ConversionAttempt {
     let started = ProcessInfo.processInfo.systemUptime
     var replacement: AccessibilityReplacementPlan?
     var deletingCharacters = 0
+    /// Backspaces the editor dropped and that were sent again.
+    var lostBackspaces = 0
     var selected = false
     var editingGuardPassed = false
     var usesNativeSearchValue = false

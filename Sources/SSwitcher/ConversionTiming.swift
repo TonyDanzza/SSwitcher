@@ -18,6 +18,10 @@ enum ConversionTiming {
     static let qtFocusProofBudget = 0.36
     static let canvasFocusPreparationBudget = 0.4
     static let replacementDeadline = 0.5
+    /// Slow web pages apply each Backspace after a re-render.
+    static let wordDeletionDeadline = 1.0
+    /// A partly deleted word unchanged this long has lost its Backspaces.
+    static let deletionStableInterval = 0.25
     static let pollInterval = 0.02
     static let textPairInterval = 0.008
     static let eventDeliveryDeadline = 0.5
