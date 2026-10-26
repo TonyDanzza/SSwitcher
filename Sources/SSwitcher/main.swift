@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let windowHotKeys = WindowMoveHotKeys()
     let functionKeys = FunctionKeyController()
     let keepAwake = KeepAwakeController()
+    let keyboardLock = KeyboardLock()
     let displayController = DisplayController()
     let mouse = MouseController()
     private let nativeServices = NativeServiceProvider()
@@ -306,6 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         functionKeys.restoreBase()
         keepAwake.stop()
         keepAwake.setShortcut(nil)
+        keyboardLock.stop(notice: false)
         settingsTimer?.invalidate()
         permissionTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }

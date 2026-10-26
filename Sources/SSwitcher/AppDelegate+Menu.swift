@@ -50,6 +50,7 @@ extension AppDelegate {
         updateMenuRows()
         for row in [layoutRow, windowsRow, functionRow] { menu.addItem(row.item) }
         for item in keepAwake.menuItems() { menu.addItem(item) }
+        for item in keyboardLock.menuItems() { menu.addItem(item) }
         menu.addItem(.separator())
         let settingsItem = add("Настройки…", action: #selector(showSettings), to: menu)
         settingsItem.keyEquivalent = ","
