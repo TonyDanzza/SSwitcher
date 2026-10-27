@@ -1,10 +1,15 @@
 import AppKit
+import Combine
 import ServiceManagement
 import SwiftUI
 import SwitcherCore
 
 enum SettingsTab: Int, CaseIterable {
-    case general, layout, windows, displays, keyboard, mouse, keepAwake, check
+    case general, layout, windows, keepAwake, displays, keyboard, mouse
+
+    /// Sidebar groups, separated by space as in System Settings: the app,
+    /// what it does, the devices it adjusts.
+    static let groups: [[SettingsTab]] = [[.general], [.layout, .windows, .keepAwake], [.displays, .keyboard, .mouse]]
 
     var title: String {
         switch self {
@@ -15,20 +20,29 @@ enum SettingsTab: Int, CaseIterable {
         case .keyboard: return "Клавиатура"
         case .mouse: return "Мышь"
         case .keepAwake: return "Не засыпать"
-        case .check: return "Проверка"
         }
     }
 
     var symbol: String {
         switch self {
-        case .general: return "gearshape"
-        case .layout: return "character.cursor.ibeam"
+        case .general: return "gearshape.fill"
+        case .layout: return "globe"
         case .windows: return "macwindow.on.rectangle"
         case .displays: return "display"
-        case .keyboard: return "keyboard"
-        case .mouse: return "computermouse"
-        case .keepAwake: return "cup.and.saucer"
-        case .check: return "stethoscope"
+        case .keyboard: return "keyboard.fill"
+        case .mouse: return "computermouse.fill"
+        case .keepAwake: return "cup.and.saucer.fill"
+        }
+    }
+
+    /// The icon tile colour. Hardware panes are grey, as in System Settings.
+    var tint: Color {
+        switch self {
+        case .general, .keyboard, .mouse: return .gray
+        case .layout: return .blue
+        case .windows: return .indigo
+        case .displays: return .cyan
+        case .keepAwake: return .orange
         }
     }
 }
@@ -59,9 +73,6 @@ final class SettingsStatus: ObservableObject {
     @Published var keepAwakeStatus = ""
     @Published var keepAwakeActive = false
     @Published var hasBattery = false
-    @Published var lastAttempt = ""
-    @Published var lastResult = ""
-    @Published var diagnostics = ""
 }
 
 /// Calls from the panes back into the app.
@@ -71,8 +82,6 @@ struct SettingsActions {
     var requestScreenCapture: () -> Void
     var toggleLogin: () -> Void
     var openLoginSettings: () -> Void
-    var openTestWindow: () -> Void
-    var copyReport: () -> Void
     var stopKeepAwake: () -> Void
     /// While a shortcut field records, SSwitcher's own shortcuts are removed
     /// so pressing the current combination records it instead of acting.
@@ -83,70 +92,137 @@ struct SettingsActions {
     var confirmWindowModifiers: (KeyShortcut.Modifiers) -> Bool
 }
 
-private final class SettingsTabsController: NSTabViewController {
-    var onSelect: ((SettingsTab) -> Void)?
+/// The selected pane, shared by the sidebar and the window controller.
+private final class SettingsSelection: ObservableObject {
+    @Published var tab: SettingsTab
+    init(_ tab: SettingsTab) { self.tab = tab }
+}
 
-    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
-        super.tabView(tabView, didSelect: tabViewItem)
-        guard let item = tabViewItem, let tab = SettingsTab(rawValue: tabView.indexOfTabViewItem(item)) else { return }
-        view.window?.title = tab.title
-        onSelect?(tab)
+private struct SettingsSidebar: View {
+    @ObservedObject var selection: SettingsSelection
+
+    var body: some View {
+        List(selection: Binding(get: { selection.tab }, set: { if let tab = $0 { selection.tab = tab } })) {
+            ForEach(SettingsTab.groups, id: \.self) { group in
+                Section {
+                    ForEach(group, id: \.self) { tab in
+                        Label { Text(tab.title) } icon: { PaneIcon(tab: tab) }
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
     }
 }
 
-/// A standard macOS settings window: a toolbar of panes, the window title
-/// following the selected pane, the last pane remembered.
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+/// The selected pane, rebuilt on every switch so it opens scrolled to the top.
+private struct SettingsContent: View {
+    @ObservedObject var selection: SettingsSelection
+    let pane: (SettingsTab) -> SettingsPanes
+
+    var body: some View {
+        pane(selection.tab).id(selection.tab)
+    }
+}
+
+/// A white glyph on a coloured rounded square, like System Settings icons.
+private struct PaneIcon: View {
+    let tab: SettingsTab
+    @Environment(\.sidebarRowSize) private var rowSize
+
+    /// The tile follows the sidebar icon size chosen in System Settings → Appearance.
+    private var side: CGFloat {
+        switch rowSize {
+        case .small: return 16
+        case .large: return 24
+        default: return 20
+        }
+    }
+
+    var body: some View {
+        // Every glyph is fitted into the same box, so wide (keyboard) and tall
+        // (mouse) symbols keep an even margin to the tile edge, as Apple's do.
+        Image(systemName: tab.symbol)
+            .resizable()
+            .scaledToFit()
+            .fontWeight(.semibold)
+            .frame(width: side * 0.64, height: side * 0.64)
+            .foregroundStyle(.white)
+            .frame(width: side, height: side)
+            .background(tab.tint.gradient, in: RoundedRectangle(cornerRadius: side * 0.24, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: side * 0.24, style: .continuous)
+                .strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+    }
+}
+
+/// A macOS settings window like System Settings: panes in a sidebar on the
+/// left, the window title following the selected pane, the last pane remembered.
+final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     var onVisibilityChange: ((Bool) -> Void)?
     var onTabChange: ((SettingsTab) -> Void)?
-    private let tabs = SettingsTabsController()
+    private let selection: SettingsSelection
+    private var selectionWatch: AnyCancellable?
     /// Stored by name: the integer index of earlier builds shifted when tabs were reordered.
     private static let tabKey = "settingsPane"
+    private static let sidebarWidth: CGFloat = 215
+    /// The unified toolbar the panes sit under.
+    private static let toolbarHeight: CGFloat = 52
 
     init(settings: AppSettings, status: SettingsStatus, functionKeys: FunctionKeyController, displays: DisplayController,
          mouse: MouseController,
          actions: SettingsActions) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SettingsPanes.width, height: SettingsPanes.height),
-                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.toolbarStyle = .preference
-        super.init(window: window)
-        window.delegate = self
-        tabs.tabStyle = .toolbar
-        // One size for every pane and an instant switch, as in System
-        // Settings: resizing the window per pane made the content jump.
-        tabs.transitionOptions = []
-        for tab in SettingsTab.allCases {
-            let pane = SettingsPanes(tab: tab, settings: settings, status: status, functionKeys: functionKeys,
-                                     displays: displays, mouse: mouse, actions: actions)
-            let host = NSHostingController(rootView: pane)
-            host.title = tab.title
-            host.sizingOptions = []
-            host.preferredContentSize = NSSize(width: SettingsPanes.width, height: SettingsPanes.height)
-            let item = NSTabViewItem(viewController: host)
-            item.label = tab.title
-            item.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: tab.title)
-            tabs.addTabViewItem(item)
-        }
-        window.contentViewController = tabs
-        tabs.onSelect = { [weak self] tab in
-            UserDefaults.standard.set("\(tab)", forKey: Self.tabKey)
-            self?.onTabChange?(tab)
-        }
         let stored = UserDefaults.standard.string(forKey: Self.tabKey)
         let saved = SettingsTab.allCases.first { "\($0)" == stored } ?? .general
-        tabs.selectedTabViewItemIndex = saved.rawValue
+        selection = SettingsSelection(saved)
+        let size = NSSize(width: Self.sidebarWidth + SettingsPanes.width, height: Self.toolbarHeight + SettingsPanes.height)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.toolbarStyle = .unified
+        super.init(window: window)
+        window.delegate = self
+        let toolbar = NSToolbar(identifier: "SSwitcherSettings")
+        toolbar.delegate = self
+        window.toolbar = toolbar
+
+        // One size for every pane and an instant switch, as in System
+        // Settings: resizing the window per pane made the content jump.
+        // One hosting view for all panes, so each form scrolls under the toolbar.
+        let content = NSHostingController(rootView: SettingsContent(selection: selection) { tab in
+            SettingsPanes(tab: tab, settings: settings, status: status, functionKeys: functionKeys,
+                          displays: displays, mouse: mouse, actions: actions)
+        })
+        content.sizingOptions = []
+
+        let sidebar = NSSplitViewItem(sidebarWithViewController: NSHostingController(rootView: SettingsSidebar(selection: selection)))
+        sidebar.canCollapse = false
+        sidebar.minimumThickness = Self.sidebarWidth
+        sidebar.maximumThickness = Self.sidebarWidth
+        let split = NSSplitViewController()
+        split.addSplitViewItem(sidebar)
+        split.addSplitViewItem(NSSplitViewItem(viewController: content))
+        window.contentViewController = split
+        window.setContentSize(size)
         window.title = saved.title
-        window.setFrameAutosaveName("SSwitcherSettingsWindow")
+        // A new name: frames saved for the narrower toolbar window would cut the panes.
+        window.setFrameAutosaveName("SSwitcherSettingsSidebarWindow")
+
+        selectionWatch = selection.$tab.removeDuplicates().dropFirst().sink { [weak self] tab in
+            guard let self else { return }
+            self.window?.title = tab.title
+            UserDefaults.standard.set("\(tab)", forKey: Self.tabKey)
+            onTabChange?(tab)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     var isVisible: Bool { window?.isVisible == true }
-    var selectedTab: SettingsTab? { SettingsTab(rawValue: tabs.selectedTabViewItemIndex) }
+    var selectedTab: SettingsTab? { selection.tab }
 
     func show(_ tab: SettingsTab? = nil) {
-        if let tab { tabs.selectedTabViewItemIndex = tab.rawValue }
+        if let tab { selection.tab = tab }
         if window?.isVisible != true { window?.center() }
         onVisibilityChange?(true)
         showWindow(nil)
@@ -158,6 +234,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window?.makeFirstResponder(nil)
         onVisibilityChange?(false)
     }
+
+    // The separator keeps the title over the pane, to the right of the sidebar.
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.sidebarTrackingSeparator] }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.sidebarTrackingSeparator] }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? { nil }
 }
 
 /// The app menu, Edit and Window menus, shown while Settings put SSwitcher in

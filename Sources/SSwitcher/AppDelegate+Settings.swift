@@ -29,8 +29,6 @@ extension AppDelegate {
                 requestScreenCapture: { [weak self] in self?.requestScreenCapture() },
                 toggleLogin: { [weak self] in self?.toggleLoginAtLaunch() },
                 openLoginSettings: { [weak self] in self?.openLoginSettings() },
-                openTestWindow: { [weak self] in self?.presentDiagnostics(activateApplication: true) },
-                copyReport: { [weak self] in self?.copyReport() },
                 stopKeepAwake: { [weak self] in self?.keepAwake.stop() },
                 recordingShortcut: { [weak self] recording in self?.recordingShortcut(recording) },
                 confirmShortcut: { [weak self] shortcut in
@@ -115,13 +113,7 @@ extension AppDelegate {
         set(\.keepAwakeActive, keepAwake.isActive)
         set(\.keepAwakeStatus, keepAwake.statusDescription)
         set(\.hasBattery, keepAwake.hasBattery)
-        set(\.lastAttempt, lastAttempt)
-        set(\.lastResult, lastResult)
-        // The report opens IOKit and power sources; build it only for the pane that shows it.
-        if settingsWindow?.selectedTab == .check { set(\.diagnostics, diagnosticsText()) }
     }
-
-    private func copyReport() { DiagnosticsWindow.copyReport(diagnosticsText()) }
 
     @objc private func toggleLoginAtLaunch() {
         loginAtLaunch.toggle { [weak self] in

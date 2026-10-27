@@ -26,12 +26,13 @@ struct SettingsPanes: View {
             case .keyboard: keyboard
             case .mouse: mousePane
             case .keepAwake: keepAwake
-            case .check: check
             }
         }
         .formStyle(.grouped)
         .toggleStyle(.switch)
-        .frame(width: Self.width, height: Self.height)
+        // Fills the pane; under the macOS 27 toolbar the form scrolls beneath the title.
+        .frame(width: Self.width)
+        .frame(maxHeight: .infinity)
     }
 
     /// Group explanations read left to right and wrap, as in System Settings.
@@ -40,7 +41,6 @@ struct SettingsPanes: View {
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -188,7 +188,7 @@ struct SettingsPanes: View {
                                 .toggleStyle(.button)
                                 .accessibilityLabel(name)
                         }
-                        Text("+ стрелка").foregroundStyle(.secondary)
+                        Text("+ стрелка").foregroundStyle(.secondary).fixedSize()
                     }
                 }
                 .disabled(!settings.windowMovementEnabled)
@@ -512,35 +512,6 @@ struct SettingsPanes: View {
                     Toggle("Выключать, когда Mac отключили от зарядки", isOn: $settings.keepAwakeStopOnUnplug)
                 } header: {
                     Text("Батарея")
-                }
-            }
-        }
-    }
-
-    // MARK: Проверка
-
-    private var check: some View {
-        Form {
-            Section {
-                LabeledContent("Последнее срабатывание", value: status.lastAttempt)
-                LabeledContent("Результат") {
-                    Text(status.lastResult).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
-                }
-                HStack {
-                    Button("Открыть тестовое окно…", action: actions.openTestWindow)
-                    Spacer()
-                    Button("Скопировать отчёт", action: actions.copyReport)
-                }
-            } footer: { note("В тестовом окне поставьте курсор после ghbdtn и дважды нажмите \(settings.triggerKey.name): должно получиться «привет». Отчёт не содержит набранного текста.") }
-            Section {
-                DisclosureGroup("Подробности") {
-                    ScrollView {
-                        Text(status.diagnostics)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(height: 220)
                 }
             }
         }

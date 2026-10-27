@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release --product SSwitcher
-BIN_DIR="$(swift build -c release --product SSwitcher --show-bin-path)"
+# The default (swiftbuild) system stamps the binary with SDK 13.0, and AppKit
+# then draws every window and menu in the macOS 13 style. Native records the real SDK.
+swift build -c release --build-system native --product SSwitcher
+BIN_DIR="$(swift build -c release --build-system native --product SSwitcher --show-bin-path)"
 APP_DIR="$PWD/build/SSwitcher.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_DIR/SSwitcher" "$APP_DIR/Contents/MacOS/SSwitcher"
