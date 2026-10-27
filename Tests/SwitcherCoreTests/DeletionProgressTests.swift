@@ -19,4 +19,11 @@ final class DeletionProgressTests: XCTestCase {
         XCTAssertEqual(DeletionProgress.evaluate(document: document, wordRange: word, value: "a  b", caret: NSRange(location: 2, length: 1)), .unknown)
         XCTAssertEqual(DeletionProgress.evaluate(document: document, wordRange: word, value: nil, caret: nil), .unknown)
     }
+
+    func testChromiumNoBreakSpaceAfterDeletionCountsAsDone() {
+        // Measured in Chrome: "что-то ещё ghbdtn" → "что-то ещё\u{A0}" after the Backspaces.
+        let document = "что-то ещё ghbdtn"
+        XCTAssertEqual(DeletionProgress.evaluate(document: document, wordRange: NSRange(location: 11, length: 6),
+                                                 value: "что-то ещё\u{00A0}", caret: NSRange(location: 11, length: 0)), .done)
+    }
 }

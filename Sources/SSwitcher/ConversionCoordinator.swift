@@ -390,16 +390,26 @@ final class ConversionCoordinator {
                                then: @escaping () -> Void) {
         guard valid(attempt) else { finish(attempt, outcome: .unverified); return }
         guard !deadline.expired(at: ProcessInfo.processInfo.systemUptime) else {
+            // The Backspaces were posted; never leave the word deleted. Type
+            // the replacement as the single-batch path did; the
+            // acknowledgement still decides whether it is confirmed.
             diagnosticDetails += "; редактор не подтвердил удаление слова"
-            finish(attempt, outcome: .unverified); return
+            attempt.deletionUnconfirmed = last.map { "\($0)" } ?? "unread"
+            then(); return
         }
         read(attempt, operation: { $0.validate(context) }) { snapshot in
-            let progress = DeletionProgress.evaluate(document: scope.document, wordRange: scope.range,
-                                                     value: snapshot?.value, caret: snapshot?.range)
+            let progress = snapshot == nil ? nil : DeletionProgress.evaluate(document: scope.document, wordRange: scope.range,
+                                                                              value: snapshot?.value, caret: snapshot?.range)
             let now = ProcessInfo.processInfo.systemUptime
             let since = progress == last ? stableSince : now
-            switch progress {
+            switch progress ?? .unknown {
             case .done: then(); return
+            case .unknown where snapshot != nil && now - since >= ConversionTiming.deletionUnreadableGrace:
+                // The editor reads, but not as the word gone or partly gone:
+                // waiting cannot confirm it, so type as the single batch did.
+                self.diagnosticDetails += "; редактор не подтвердил удаление слова"
+                attempt.deletionUnconfirmed = Self.deletionShape(scope: scope, snapshot: snapshot)
+                then(); return
             case .remaining(let count) where count < posted && topUps < 2 && now - since >= ConversionTiming.deletionStableInterval:
                 attempt.lostBackspaces += count
                 self.deleteWord(attempt, context: context, scope: scope, count: count, topUps: topUps + 1, deadline: deadline, then: then)
@@ -411,6 +421,15 @@ final class ConversionCoordinator {
                                    last: progress, stableSince: since, then: then)
             }
         }
+    }
+
+    /// Text-free numbers for an unreadable deletion: value length and caret
+    /// relative to the word gone, newlines and no-break spaces in the value.
+    private static func deletionShape(scope: AccessibilitySelectionPlan, snapshot: AXEditorSnapshot?) -> String {
+        guard let value = snapshot?.value, let caret = snapshot?.range else { return "unknown" }
+        let expected = (scope.document as NSString).length - scope.range.length
+        return "unknown len\((value as NSString).length - expected) caret\(caret.location - scope.range.location)/\(caret.length)"
+            + " nl\(value.filter { $0 == "\n" }.count)/\(scope.document.filter { $0 == "\n" }.count) nbsp\(value.contains("\u{a0}") ? 1 : 0)"
     }
 
     private func mutationDelivered(_ attempt: ConversionAttempt, delivered: Bool) {
@@ -551,6 +570,7 @@ final class ConversionCoordinator {
         lastSummary = ["phase": attempt.phase, "elapsedMS": Int((ProcessInfo.processInfo.systemUptime - attempt.started) * 1000)]
         if let refusal = attempt.refusal { lastSummary["refusal"] = refusal.rawValue }
         if attempt.lostBackspaces > 0 { lastSummary["lostBackspaces"] = attempt.lostBackspaces }
+        if let unconfirmed = attempt.deletionUnconfirmed { lastSummary["deletionUnconfirmed"] = unconfirmed }
         if let context = attempt.context {
             var report = context.conversionDiagnostic()
             switch outcome {
@@ -612,6 +632,8 @@ private final class ConversionAttempt {
     var deletingCharacters = 0
     /// Backspaces the editor dropped and that were sent again.
     var lostBackspaces = 0
+    /// Last deletion state seen when its confirmation timed out.
+    var deletionUnconfirmed: String?
     var selected = false
     var editingGuardPassed = false
     var usesNativeSearchValue = false

@@ -22,6 +22,9 @@ enum ConversionTiming {
     static let wordDeletionDeadline = 1.0
     /// A partly deleted word unchanged this long has lost its Backspaces.
     static let deletionStableInterval = 0.25
+    /// An editor whose text keeps a shape the word check cannot read (Claude's
+    /// composer) gets the replacement after this, not at the deadline.
+    static let deletionUnreadableGrace = 0.12
     static let pollInterval = 0.02
     static let textPairInterval = 0.008
     static let eventDeliveryDeadline = 0.5

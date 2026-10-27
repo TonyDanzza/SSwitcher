@@ -22,7 +22,12 @@ public enum DeletionProgress: Equatable {
         let current = value as NSString
         let kept = current.length - (before as NSString).length - (after as NSString).length
         guard kept >= 0, kept <= word.length, caret.location == wordRange.location + kept,
-              value == before + word.substring(to: kept) + after else { return .unknown }
+              Self.plain(value) == Self.plain(before + word.substring(to: kept) + after) else { return .unknown }
         return kept == 0 ? .done : .remaining(kept)
     }
+
+    /// Chromium editors turn the space left at the end of a line into a
+    /// no-break space while the word after it is gone, and back once text
+    /// follows. Both are one UTF-16 unit, so offsets are unaffected.
+    private static func plain(_ text: String) -> String { text.replacingOccurrences(of: "\u{00A0}", with: " ") }
 }
