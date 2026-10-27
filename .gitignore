@@ -4,7 +4,11 @@ build/
 .DS_Store
 *.xcodeproj/xcuserdata/
 
-# Local investigation notes and preserved experiment history
-docs/local/
-docs/resume-max.md
-docs/implementation-brief.txt
+# Development notes: architecture, research, checks, plans. They stay on
+# the developer's Mac and are not part of the published project.
+docs/
+
+# Intermediate icon renders; the build uses Resources/AppIcon.icns.
+# Recreate them with scripts/generate-icons.swift (see README, «Иконки»).
+Resources/AppIcon.iconset/
+Resources/AppIcon.png
