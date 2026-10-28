@@ -183,7 +183,9 @@ final class KeyboardMonitor {
         }
         let key = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         switch type {
-        case .keyDown: recordTyping(event, key: key)
+        case .keyDown:
+            for (code, flag) in Self.modifierFlags where !event.flags.contains(flag) { modifiers.released(key: code) }
+            recordTyping(event, key: key)
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             guard tracksTypedWord else { break }
             forgetTypedWord("click")
@@ -216,7 +218,7 @@ final class KeyboardMonitor {
             onRealInput?()
         }
         guard type == .flagsChanged else { detector.cancelGesture(); return }
-        if let flag = Self.modifierFlags[key] { modifiers.changed(key: key, groupDown: event.flags.contains(flag)) }
+        if let flag = Self.modifierFlags[key] { modifiers.changed(key: key, groupDown: event.flags.contains(flag), deviceFlags: event.flags.rawValue) }
         guard triggerKeys.contains(key) else { detector.cancelGesture(); return }
         let triggers = triggerKeys
         let shiftDown = modifiers.holds(any: triggers) || triggers.contains(where: Self.hardwareKeyDown)

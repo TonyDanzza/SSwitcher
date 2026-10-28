@@ -51,4 +51,30 @@ final class PhysicalModifierStateTests: XCTestCase {
             XCTAssertTrue(state.observedModifiersClear)
         }
     }
+    func testReleaseOfKeyPressedUnseenDoesNotStickWhileOtherSideIsHeld() {
+        // Both Options held through the cleaning lock; it ends, then the left
+        // one is released while the right one is still down.
+        var state = PhysicalModifierState()
+        state.changed(key: 58, groupDown: true, deviceFlags: 0x80000 | 0x40)
+        XCTAssertFalse(state.holds(any: [58]))
+        state.changed(key: 61, groupDown: false, deviceFlags: 0)
+        XCTAssertTrue(state.observedModifiersClear)
+    }
+    func testPressWithOtherSideHeldIsStillSeen() {
+        var state = PhysicalModifierState()
+        state.changed(key: 55, groupDown: true, deviceFlags: 0x100000 | 0x08)
+        state.changed(key: 54, groupDown: true, deviceFlags: 0x100000 | 0x08 | 0x10)
+        XCTAssertTrue(state.holds(any: [54]) && state.holds(any: [55]))
+    }
+    func testKeyboardWithoutDeviceBitsKeepsAggregateBehaviour() {
+        var state = PhysicalModifierState()
+        state.changed(key: 58, groupDown: true, deviceFlags: 0x80000)
+        XCTAssertTrue(state.holds(any: [58]))
+    }
+    func testKeyPressWithoutTheGroupFlagClearsAStuckModifier() {
+        var state = PhysicalModifierState()
+        state.changed(key: 55, groupDown: true)
+        state.released(key: 55)
+        XCTAssertTrue(state.observedModifiersClear)
+    }
 }
