@@ -62,8 +62,8 @@ public struct KeyShortcut: Hashable, Sendable {
 
     public init?(storage: [String: Any]?) {
         guard let storage, let key = storage["keyCode"] as? Int, let flags = storage["modifiers"] as? Int,
-              (0...0xFF).contains(key), flags >= 0 else { return nil }
-        self.init(keyCode: UInt32(key), modifiers: Modifiers(rawValue: UInt32(flags)))
+              (0...0xFF).contains(key), let flags = UInt32(exactly: flags) else { return nil }
+        self.init(keyCode: UInt32(key), modifiers: Modifiers(rawValue: flags))
         guard problem == nil else { return nil }
     }
 }

@@ -196,7 +196,6 @@ final class DisplayOverrideTests: XCTestCase {
         XCTAssertEqual(value["DisplayVendorID"] as? Int, 7789)
         XCTAssertEqual(value["DisplayProductID"] as? Int, 23446)
         XCTAssertEqual((value["scale-resolutions"] as? [Data])?.count, 4)
-        XCTAssertEqual(DisplayOverride.backingSizes(in: plist).map(\.width), [5120, 3840])
     }
 
     func testShellQuoting() {

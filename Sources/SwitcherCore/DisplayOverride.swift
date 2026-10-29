@@ -55,20 +55,6 @@ public enum DisplayOverride {
         return try PropertyListSerialization.data(fromPropertyList: value, format: .xml, options: 0)
     }
 
-    /// Backing-store pixel sizes listed in an override, for showing what an
-    /// existing file (SSwitcher's or another tool's) provides.
-    public static func backingSizes(in plist: Data) -> [(width: Int, height: Int)] {
-        guard let value = try? PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any],
-              let entries = value["scale-resolutions"] as? [Data] else { return [] }
-        var seen = Set<String>(), result: [(Int, Int)] = []
-        for entry in entries where entry.count >= 8 {
-            let bytes = [UInt8](entry)
-            let width = bytes[0..<4].reduce(0) { $0 << 8 | Int($1) }, height = bytes[4..<8].reduce(0) { $0 << 8 | Int($1) }
-            if seen.insert("\(width)x\(height)").inserted { result.append((width, height)) }
-        }
-        return result.map { (width: $0.0, height: $0.1) }
-    }
-
     /// Wraps a path for `/bin/sh` in single quotes.
     public static func shellQuoted(_ path: String) -> String { "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 }

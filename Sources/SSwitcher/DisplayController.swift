@@ -174,29 +174,21 @@ final class DisplayController: ObservableObject {
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let target = display.overridePath
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let backupRoot = Self.supportFolder.appendingPathComponent("removed-\(stamp)")
-        let backup = backupRoot.appendingPathComponent(DisplayOverride.relativePath(vendor: display.vendor, model: display.model))
-        // Never delete a file whose copy could not be kept.
-        if FileManager.default.fileExists(atPath: target) {
-            do {
-                try FileManager.default.createDirectory(at: backup.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try FileManager.default.copyItem(atPath: target, toPath: backup.path)
-            } catch {
-                try? FileManager.default.removeItem(at: backupRoot)
-                lastMessage = "Не удалось сохранить копию файла, он не удалён: \(error.localizedDescription)"
-                return
-            }
+        let backupRoot = Self.supportFolder.appendingPathComponent("removed-" + UUID().uuidString)
+        let removal: DisplayOverrideRemoval
+        do {
+            removal = try DisplayOverrideRemoval(target: target, backupDirectory: backupRoot)
+        } catch {
+            lastMessage = "Не удалось сохранить копии файлов, удаление не начато: \(error.localizedDescription)"
+            return
         }
-        let q = DisplayOverride.shellQuoted
-        let folder = (target as NSString).deletingLastPathComponent
-        runPrivileged("/bin/rm -f \(q(target)) \(q(target + ".icns")); /bin/rmdir \(q(folder)) 2>/dev/null; true") { [weak self] done in
-            if !done { try? FileManager.default.removeItem(at: backupRoot) }
+        runPrivileged(removal.command) { [weak self] done in
             guard let self else { return }
             if done {
                 self.pendingRestart.insert(target)
-                self.lastMessage = "Файл убран, копия сохранена. Перезагрузите Mac."
+                self.lastMessage = "Файлы убраны, копии сохранены. Перезагрузите Mac."
             }
+            // Keep backups even if deletion failed partway through.
             self.refresh()
         }
     }

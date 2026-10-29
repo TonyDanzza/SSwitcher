@@ -219,7 +219,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTo
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     var isVisible: Bool { window?.isVisible == true }
-    var selectedTab: SettingsTab? { selection.tab }
 
     func show(_ tab: SettingsTab? = nil) {
         if let tab { selection.tab = tab }

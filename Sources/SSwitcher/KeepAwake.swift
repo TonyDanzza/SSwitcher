@@ -13,6 +13,7 @@ final class KeepAwakeController: NSObject {
     private var assertion = IOPMAssertionID(0)
     private(set) var endDate: Date?
     private var minutes: Int?
+    private var appliedSystemOnly: Bool?
     private(set) var lastResult: String?
     private var timer: Timer?
     private var powerSource: CFRunLoopSource?
@@ -56,27 +57,18 @@ final class KeepAwakeController: NSObject {
             onChange?()
             return
         }
-        var properties: [String: Any] = [
-            kIOPMAssertionTypeKey: settings.keepAwakeSystemOnly
-                ? kIOPMAssertionTypePreventUserIdleSystemSleep : kIOPMAssertionTypePreventUserIdleDisplaySleep,
-            kIOPMAssertionLevelKey: kIOPMAssertionLevelOn,
-            kIOPMAssertionNameKey: settings.keepAwakeSystemOnly ? "SSwitcher: keep Mac awake" : "SSwitcher: keep display awake"
-        ]
-        if let minutes {
-            properties[kIOPMAssertionTimeoutKey] = minutes * 60
-            properties[kIOPMAssertionTimeoutActionKey] = kIOPMAssertionTimeoutActionRelease
-        }
-        var identifier = IOPMAssertionID(0)
-        guard IOPMAssertionCreateWithProperties(properties as CFDictionary, &identifier) == kIOReturnSuccess, identifier != 0 else {
+        let end = minutes.map { Date().addingTimeInterval(Double($0) * 60) }
+        guard let configuration = KeepAwakeConfiguration(systemOnly: settings.keepAwakeSystemOnly, endDate: end, now: Date()),
+              let identifier = Self.createAssertion(configuration) else {
             lastResult = "macOS не разрешила держать экран включённым"
             onChange?()
             return
         }
         assertion = identifier
+        appliedSystemOnly = configuration.systemOnly
         self.minutes = minutes
         lastResult = nil
-        if let minutes {
-            let end = Date().addingTimeInterval(Double(minutes) * 60)
+        if let end {
             endDate = end
             let timer = Timer(fire: end, interval: 0, repeats: false) { [weak self] _ in self?.expireIfDue() }
             timer.tolerance = 1
@@ -91,6 +83,45 @@ final class KeepAwakeController: NSObject {
         onChange?()
     }
 
+    /// Changing Settings updates an active session without restarting its timer.
+    func applySettings() {
+        guard isActive, appliedSystemOnly != settings.keepAwakeSystemOnly else { return }
+        guard let configuration = KeepAwakeConfiguration(systemOnly: settings.keepAwakeSystemOnly,
+                                                         endDate: endDate, now: Date()) else {
+            stop()
+            return
+        }
+        // Acquire the new assertion first. A failure preserves the old session.
+        guard let replacement = Self.createAssertion(configuration) else {
+            lastResult = "Не удалось применить режим сна; прежний режим остаётся активным"
+            onChange?()
+            return
+        }
+        let previous = assertion
+        assertion = replacement
+        appliedSystemOnly = configuration.systemOnly
+        IOPMAssertionRelease(previous)
+        lastResult = nil
+        onChange?()
+    }
+
+    private static func createAssertion(_ configuration: KeepAwakeConfiguration) -> IOPMAssertionID? {
+        var properties: [String: Any] = [
+            kIOPMAssertionTypeKey: configuration.systemOnly
+                ? kIOPMAssertionTypePreventUserIdleSystemSleep : kIOPMAssertionTypePreventUserIdleDisplaySleep,
+            kIOPMAssertionLevelKey: kIOPMAssertionLevelOn,
+            kIOPMAssertionNameKey: configuration.systemOnly ? "SSwitcher: keep Mac awake" : "SSwitcher: keep display awake"
+        ]
+        if let timeout = configuration.timeout {
+            properties[kIOPMAssertionTimeoutKey] = timeout
+            properties[kIOPMAssertionTimeoutActionKey] = kIOPMAssertionTimeoutActionRelease
+        }
+        var identifier = IOPMAssertionID(0)
+        guard IOPMAssertionCreateWithProperties(properties as CFDictionary, &identifier) == kIOReturnSuccess,
+              identifier != 0 else { return nil }
+        return identifier
+    }
+
     func stop(result: String? = nil) {
         release()
         lastResult = result
@@ -99,8 +130,9 @@ final class KeepAwakeController: NSObject {
 
     var statusDescription: String {
         guard isActive else { return "Не засыпать: выключено" + (lastResult.map { "; \($0)" } ?? "") }
-        guard let endDate else { return "Не засыпать: пока не выключат" }
-        return "Не засыпать: до \(Self.clock(endDate)), осталось \(KeepAwakeDuration.remaining(seconds: endDate.timeIntervalSinceNow))"
+        let description = endDate.map { "Не засыпать: до \(Self.clock($0)), осталось \(KeepAwakeDuration.remaining(seconds: $0.timeIntervalSinceNow))" }
+            ?? "Не засыпать: пока не выключат"
+        return description + (lastResult.map { "; \($0)" } ?? "")
     }
 
     var iconDescription: String? {
@@ -193,6 +225,7 @@ final class KeepAwakeController: NSObject {
     private func release() {
         if assertion != 0 { IOPMAssertionRelease(assertion) }
         assertion = 0
+        appliedSystemOnly = nil
         timer?.invalidate(); timer = nil
         endDate = nil; minutes = nil
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }

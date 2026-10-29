@@ -228,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func refreshWindowShortcuts() {
         let directions = windowShortcutDirections
-        if windowMovementEnabled && !nativeServices.isConverting && AXIsProcessTrusted() &&
+        if !isRecordingShortcut && windowMovementEnabled && !nativeServices.isConverting && AXIsProcessTrusted() &&
             CGPreflightListenEventAccess() && monitor.isRunning && displayCount >= 2 && !directions.isEmpty {
             windowHotKeys.start(directions: directions, modifiers: settings.windowModifiers)
         } else {
@@ -249,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         applyDoubleShiftSettings()
         applyMouseSettings()
+        keepAwake.applySettings()
         if !isRecordingShortcut {
             functionKeys.setShortcut(settings.functionKeyShortcut)
             keepAwake.setShortcut(settings.keepAwakeShortcut)

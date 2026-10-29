@@ -24,8 +24,4 @@ public struct NativeWordBoundaryPlan {
         self.trailing = trailing
     }
     public func matches(_ selection: String) -> Bool { self.selection.utf16.elementsEqual(selection.utf16) }
-    /// Exactly one whitespace grapheme proves the right boundary.
-    public static func isFollowingDelimiter(_ selection: String) -> Bool {
-        selection.count == 1 && selection.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
-    }
 }

@@ -81,7 +81,6 @@ final class ConversionTrace {
     private let release: Double
     private var intervals: [ConversionMetric: (Double, OSSignpostIntervalState)] = [:]
     private var finished = false
-    private var confirmed = false
     private(set) var durations: [ConversionMetric: Double] = [:]
     private(set) var bucket: String?
     private(set) var modeLabel = "Редактор"
@@ -110,7 +109,6 @@ final class ConversionTrace {
     func finish(confirmed: Bool) {
         guard !finished else { return }
         finished = true
-        self.confirmed = confirmed
         if confirmed { signposter.emitEvent("EditorAcknowledged", id: id) }
         for metric in Array(intervals.keys) { end(metric) }
         if confirmed { for (metric, value) in durations { recorder?.record(self, metric: metric, duration: value) } }

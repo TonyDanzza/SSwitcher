@@ -80,11 +80,14 @@ extension AppDelegate {
     private func recordingShortcut(_ recording: Bool) {
         isRecordingShortcut = recording
         if recording {
+            windowHotKeys.stop()
+            windowMoves.cancel()
             functionKeys.setShortcut(nil)
             keepAwake.setShortcut(nil)
         } else {
             functionKeys.setShortcut(settings.functionKeyShortcut)
             keepAwake.setShortcut(settings.keepAwakeShortcut)
+            refreshWindowShortcuts()
             refreshSettingsStatus()
         }
     }

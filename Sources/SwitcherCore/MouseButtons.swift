@@ -106,14 +106,16 @@ public struct MouseButtonBinding: Hashable, Identifiable, Sendable {
     }
 
     public init?(storage: [String: Any]) {
-        guard let button = storage["button"] as? Int, let flags = storage["modifiers"] as? Int, flags >= 0,
+        guard let button = storage["button"] as? Int, let rawFlags = storage["modifiers"] as? Int, let flags = UInt32(exactly: rawFlags),
               let raw = storage["action"] as? String, let kind = MouseAction.Kind(rawValue: raw) else { return nil }
         var action = MouseAction(kind: kind)
-        if kind == .shortcut, let key = storage["keyCode"] as? Int, let keyFlags = storage["keyModifiers"] as? Int,
-           (0...0xFF).contains(key), keyFlags >= 0 {
-            action = .shortcut(KeyShortcut(keyCode: UInt32(key), modifiers: .init(rawValue: UInt32(keyFlags))))
+        if kind == .shortcut, storage["keyCode"] != nil || storage["keyModifiers"] != nil {
+            guard let key = storage["keyCode"] as? Int, (0...0xFF).contains(key),
+                  let rawKeyFlags = storage["keyModifiers"] as? Int,
+                  let keyFlags = UInt32(exactly: rawKeyFlags) else { return nil }
+            action = .shortcut(KeyShortcut(keyCode: UInt32(key), modifiers: .init(rawValue: keyFlags)))
         }
-        self.init(button: button, modifiers: .init(rawValue: UInt32(flags)), action: action)
+        self.init(button: button, modifiers: .init(rawValue: flags), action: action)
     }
 
     /// Unreadable entries are dropped and a repeated button keeps its first action.

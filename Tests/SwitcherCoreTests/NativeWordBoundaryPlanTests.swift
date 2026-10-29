@@ -11,14 +11,6 @@ final class NativeWordBoundaryPlanTests: XCTestCase {
             XCTAssertNil(NativeWordBoundaryPlan(selection: text), text)
         }
     }
-    func testOnlyOneExplicitWhitespaceGraphemeProvesRightBoundary() {
-        for delimiter in [" ", "\n", "\r\n", "\t", "\u{00a0}"] {
-            XCTAssertTrue(NativeWordBoundaryPlan.isFollowingDelimiter(delimiter), delimiter)
-        }
-        for invalid in ["", "d", "  ", " word", "ghbdtn", "👩‍💻", "!"] {
-            XCTAssertFalse(NativeWordBoundaryPlan.isFollowingDelimiter(invalid), invalid)
-        }
-    }
     func testExactCommitPreservesUnicodeNormalizationAndRejectsNeighbors() throws {
         let plan = try XCTUnwrap(NativeWordBoundaryPlan(selection: "e\u{301}"))
         XCTAssertTrue(plan.matches("e\u{301}"))
