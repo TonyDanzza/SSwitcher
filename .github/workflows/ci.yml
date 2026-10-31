@@ -5,13 +5,16 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test double-Shift detection
+      - name: Test
         run: swift test
-      - name: Build app
-        run: bash scripts/build-app.sh
-      - name: Package app
-        run: ditto -c -k --sequesterRsrc --keepParent build/SSwitcher.app build/SSwitcher.zip
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build universal DMG
+        run: bash scripts/build-dmg.sh
       - uses: actions/upload-artifact@v4
         with:
           name: SSwitcher-macOS
-          path: build/SSwitcher.zip
+          path: |
+            build/SSwitcher-*-universal.dmg
+            build/SSwitcher-*-universal.dmg.sha256
